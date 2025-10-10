@@ -23,8 +23,7 @@ npm run preview
 ```
 
 ## Próximos pasos sugeridos
-- Añadir **IndexedDB/OPFS** para packs de frases
-- Cargar **SMF** (archivos .mid) y metadatos de frase
+
 - Transposición diatónica (tonalidad global) y cuantización por barra/beat
 - Exportar a **SMF** y a **WAV** (OfflineAudioContext)
 - Integrar **FluidSynth WASM** + SoundFont GM
