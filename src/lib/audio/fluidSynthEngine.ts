@@ -150,7 +150,7 @@ export class FluidSynthEngine {
     await this.loadSoundFontFromBuffer(buffer, nameHint);
   }
 
-  async playClip(events: PhraseEvent[], bpm: number) {
+  async playClip(events: PhraseEvent[], bpm: number): Promise<number> {
     await this.ensureInitialized();
     if (!this.soundFontInfo) {
       throw new Error('Carga un SoundFont GM (.sf2) antes de reproducir.');
@@ -181,6 +181,8 @@ export class FluidSynthEngine {
       }, delayMs);
       this.pendingTimers.push(handle);
     }
+
+    return startTime;
   }
 
   async stop() {

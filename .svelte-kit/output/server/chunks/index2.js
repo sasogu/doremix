@@ -2325,6 +2325,10 @@ function attributes(attrs, css_hash, classes, styles, flags = 0) {
   }
   return attr_str;
 }
+function attr_style(value, directives) {
+  var result = to_style(value, directives);
+  return result ? ` style="${escape_html(result, true)}"` : "";
+}
 function store_get(store_values, store_name, store) {
   if (store_name in store_values && store_values[store_name][0] === store) {
     return store_values[store_name][2];
@@ -2343,6 +2347,12 @@ function unsubscribe_stores(store_values) {
   for (const store_name in store_values) {
     store_values[store_name][1]();
   }
+}
+function ensure_array_like(array_like_or_iterator) {
+  if (array_like_or_iterator) {
+    return array_like_or_iterator.length !== void 0 ? array_like_or_iterator : Array.from(array_like_or_iterator);
+  }
+  return [];
 }
 export {
   EFFECT_PRESERVED as A,
@@ -2368,7 +2378,9 @@ export {
   experimental_async_ssr as U,
   store_get as V,
   attr as W,
-  unsubscribe_stores as X,
+  ensure_array_like as X,
+  attr_style as Y,
+  unsubscribe_stores as Z,
   HYDRATION_END as a,
   HYDRATION_START as b,
   HYDRATION_START_ELSE as c,

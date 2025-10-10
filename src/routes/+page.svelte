@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { browser } from '$app/environment';
   import {
     phrasePacks,
     initPhrasePackStore,
@@ -8,12 +9,66 @@
     getPhrase,
     deletePack,
     type Phrase,
-    type PhraseEvent
+    type PhraseEvent,
+    type PhrasePack
   } from '$lib/storage/phrasePacks';
   import { parseSMF, type SMFMetadata } from '$lib/midi/smf';
+  import { FluidSynthEngine, type FluidSynthStatus } from '$lib/audio/fluidSynthEngine';
+  import {
+    builtinPhrases,
+    getBuiltinPhraseByKey,
+    type PhraseCategory
+  } from '$lib/sequencer/builtinPhrases';
+
+  type EngineMode = 'basic' | 'fluid';
+  type PlaySource = 'arrangement' | 'phrase';
+  type PhraseKey = string | null;
+
+  const SLOT_COUNT = 8;
+  const slotIndices = Array.from({ length: SLOT_COUNT }, (_, idx) => idx);
+
+  type TrackLane = {
+    id: string;
+    name: string;
+    color: string;
+    category: PhraseCategory | 'any';
+    slots: PhraseKey[];
+  };
+
+  type PhraseOptionEntry = {
+    key: string;
+    label: string;
+    category: PhraseCategory | 'any';
+    source: 'builtin' | 'pack';
+  };
+
+  const builtinOptionEntries: PhraseOptionEntry[] = builtinPhrases
+    .map((entry) => ({
+      key: entry.key,
+      label: entry.name,
+      category: entry.category,
+      source: 'builtin'
+    }))
+    .sort((a, b) => a.label.localeCompare(b.label, 'es', { sensitivity: 'base' }));
 
   let ac: AudioContext;
   let worklet: AudioWorkletNode;
+  let fluidEngine: FluidSynthEngine | null = null;
+
+  let engineMode: EngineMode = 'basic';
+  let playSource: PlaySource = 'arrangement';
+
+  let fluidStatus: FluidSynthStatus = {
+    ready: false,
+    soundFontLoaded: false,
+    soundFontName: undefined,
+    lastError: null
+  };
+  let fluidError: string | null = null;
+  let soundFontLoading = false;
+  let lastSoundFontName = '';
+  const defaultSoundFontPath = '/fluidsynth/gm.sf2';
+
   let bpm = 120;
   let isPlaying = false;
 
@@ -34,8 +89,12 @@
     bpm,
     events: cloneEvents(defaultEvents)
   };
-
   let clip = currentPhrase.events;
+
+  let trackLanes: TrackLane[] = createInitialArrangement();
+  let arrangementEvents: PhraseEvent[] = [];
+  let arrangementActiveBars = 0;
+
   let storageReady = false;
   let storageError: string | null = null;
   let newPackName = 'Pack demo';
@@ -50,10 +109,97 @@
   let midiLoading = false;
   let midiFileName = '';
 
-  $: packsCount = $phrasePacks.length;
+  let packList: PhrasePack[] = [];
+  let packOptionEntries: PhraseOptionEntry[] = [];
+
+  let packsCount = 0;
+  let currentPhraseLabel = currentPhrase.name;
+  let currentOptionLabel = `${currentPhraseLabel} (en edición)`;
+  let currentSoundFontLabel = 'Sin SoundFont cargado';
+  let hasEvents = clip.length > 0;
+  let isPlayDisabled = false;
+
+  let activeSlotIndex: number | null = null;
+  let visualRafHandle: number | null = null;
+  let visualStartTime = 0;
+  let visualTotalBeats = 0;
+  let slotDurations: number[] = Array(SLOT_COUNT).fill(0);
+  let slotOffsets: number[] = Array(SLOT_COUNT).fill(0);
+  let arrangementTotalBeats = 0;
+  let previewLaneId: string | null = null;
+  let previewSlotIndex: number | null = null;
+  let previewTimer: ReturnType<typeof setTimeout> | null = null;
+
+  $: packList = $phrasePacks;
+  $: packsCount = packList.length;
   $: currentPhraseLabel = currentPhrase?.name ?? 'Clip actual';
+  $: currentOptionLabel = `${currentPhraseLabel} (en edición)`;
   $: if (storageReady && !appendPackId && packsCount > 0) {
-    appendPackId = $phrasePacks[0].id;
+    appendPackId = packList[0].id;
+  }
+  $: packOptionEntries = packList
+    .flatMap((pack) =>
+      pack.phrases.map((phrase) => ({
+        key: `pack:${pack.id}:${phrase.id}`,
+        label: `${pack.name} · ${phrase.name}`,
+        category: 'any',
+        source: 'pack'
+      }))
+    )
+    .sort((a, b) => a.label.localeCompare(b.label, 'es', { sensitivity: 'base' }));
+  $: slotDurations = computeSlotDurations(trackLanes, currentPhrase, packList);
+  $: slotOffsets = computeSlotOffsets(slotDurations);
+  $: arrangementTotalBeats = slotDurations.reduce((sum, len) => sum + len, 0);
+  $: arrangementEvents = buildArrangementEvents(trackLanes, currentPhrase, packList, slotOffsets);
+  $: arrangementActiveBars = computeActiveBars(trackLanes);
+  $: hasEvents = playSource === 'arrangement' ? arrangementEvents.length > 0 : clip.length > 0;
+  $: isPlayDisabled =
+    !hasEvents ||
+    (engineMode === 'fluid' && (!fluidStatus.ready || !fluidStatus.soundFontLoaded || soundFontLoading));
+  $: currentSoundFontLabel = fluidStatus.soundFontLoaded
+    ? fluidStatus.soundFontName ?? lastSoundFontName ?? 'SoundFont cargado'
+    : 'Sin SoundFont cargado';
+
+  function createInitialArrangement(): TrackLane[] {
+    return [
+      {
+        id: 'track-perc',
+        name: 'Percusión',
+        color: '#f97316',
+        category: 'perc',
+        slots: createSlotsFromPattern(['builtin:perc-classic'])
+      },
+      {
+        id: 'track-bass',
+        name: 'Bajo',
+        color: '#22d3ee',
+        category: 'bass',
+        slots: createSlotsFromPattern(['builtin:bass-pulse', 'builtin:bass-syncopated'])
+      },
+      {
+        id: 'track-chords',
+        name: 'Acordes',
+        color: '#a855f7',
+        category: 'chords',
+        slots: createSlotsFromPattern(['builtin:chords-blocks', 'builtin:chords-rhythm'])
+      },
+      {
+        id: 'track-lead',
+        name: 'Lead',
+        color: '#f472b6',
+        category: 'melody',
+        slots: createSlotsFromPattern([
+          'builtin:lead-arp',
+          'builtin:lead-counter',
+          null,
+          'builtin:lead-arp'
+        ])
+      }
+    ];
+  }
+
+  function createSlotsFromPattern(pattern: (string | null)[]) {
+    return Array.from({ length: SLOT_COUNT }, (_, idx) => pattern[idx % pattern.length] ?? null);
   }
 
   function cloneEvents(events: PhraseEvent[]) {
@@ -69,39 +215,503 @@
     };
   }
 
-  async function setup() {
+  function computeActiveBars(lanes: TrackLane[]) {
+    const active = new Set<number>();
+    for (const lane of lanes) {
+      lane.slots.forEach((slot, idx) => {
+        if (slot) active.add(idx);
+      });
+    }
+    return active.size;
+  }
+
+  function resolvePhraseByKey(
+    key: string | null,
+    current: Phrase,
+    packs: PhrasePack[]
+  ): Phrase | null {
+    if (!key) return null;
+    if (key === 'current') return current;
+    if (key.startsWith('builtin:')) {
+      const entry = getBuiltinPhraseByKey(key.replace('builtin:', ''));
+      return entry ? entry.phrase : null;
+    }
+    if (key.startsWith('pack:')) {
+      const [, packId, phraseId] = key.split(':');
+      const pack = packs.find((p) => p.id === packId);
+      const phrase = pack?.phrases.find((p) => p.id === phraseId);
+      return phrase ?? null;
+    }
+    return null;
+  }
+
+  function getPhraseLabel(
+    key: string | null,
+    currentLabel: string,
+    packs: PhrasePack[]
+  ): string {
+    if (!key) return '— Vacío —';
+    if (key === 'current') return `${currentLabel} (actual)`;
+    if (key.startsWith('builtin:')) {
+      return getBuiltinPhraseByKey(key.replace('builtin:', ''))?.name ?? 'Frase base';
+    }
+    if (key.startsWith('pack:')) {
+      const [, packId, phraseId] = key.split(':');
+      const pack = packs.find((p) => p.id === packId);
+      const phrase = pack?.phrases.find((p) => p.id === phraseId);
+      if (pack && phrase) return `${pack.name} · ${phrase.name}`;
+      return 'Frase de pack';
+    }
+    return 'Frase';
+  }
+
+  function estimatePhraseDurationBeats(phrase: Phrase | null): number {
+    if (!phrase || !phrase.events.length) return 0;
+    let minBeat = Number.POSITIVE_INFINITY;
+    let maxBeat = Number.NEGATIVE_INFINITY;
+    for (const ev of phrase.events) {
+      if (Number.isFinite(ev.beat)) {
+        if (ev.beat < minBeat) minBeat = ev.beat;
+        if (ev.beat > maxBeat) maxBeat = ev.beat;
+      }
+    }
+    if (!Number.isFinite(maxBeat)) return 0;
+    if (!Number.isFinite(minBeat)) minBeat = 0;
+    const span = maxBeat - Math.min(minBeat, 0);
+    const padding = 0.5; // pequeño margen para dejar respirar el loop
+    return Math.max(span + padding, 1);
+  }
+
+  function computeSlotDurations(
+    lanes: TrackLane[],
+    current: Phrase,
+    packs: PhrasePack[]
+  ): number[] {
+    return slotIndices.map((slotIndex) => {
+      let maxDuration = 0;
+      let hasPhrase = false;
+      for (const lane of lanes) {
+        const phrase = resolvePhraseByKey(lane.slots[slotIndex], current, packs);
+        if (!phrase) continue;
+        hasPhrase = true;
+        const duration = estimatePhraseDurationBeats(phrase);
+        if (duration > maxDuration) maxDuration = duration;
+      }
+      if (!hasPhrase) return 0;
+      return maxDuration;
+    });
+  }
+
+  function computeSlotOffsets(durations: number[]): number[] {
+    const offsets: number[] = [];
+    let sum = 0;
+    for (let i = 0; i < durations.length; i++) {
+      offsets.push(sum);
+      sum += durations[i];
+    }
+    return offsets;
+  }
+
+  function optionAllowedForLane(option: PhraseOptionEntry, lane: TrackLane) {
+    if (lane.category === 'any') return true;
+    if (option.category === 'any') return true;
+    return option.category === lane.category;
+  }
+
+  function startVisualTracking(source: PlaySource, startTime: number) {
+    stopVisualTracking();
+    if (source !== 'arrangement') return;
+    if (!ac) return;
+    visualStartTime = startTime;
+    const secPerBeat = 60 / bpm;
+    const totalBeats = arrangementTotalBeats;
+    visualTotalBeats = totalBeats;
+    if (totalBeats <= 0) return;
+
+    const tick = () => {
+      if (!ac) {
+        stopVisualTracking();
+        return;
+      }
+      const now = ac.currentTime;
+      const elapsedSeconds = now - visualStartTime;
+      if (elapsedSeconds < 0) {
+        activeSlotIndex = null;
+      } else {
+        const elapsedBeats = elapsedSeconds / secPerBeat;
+        if (elapsedBeats >= visualTotalBeats) {
+          activeSlotIndex = null;
+          stopVisualTracking();
+          return;
+        }
+        let foundIndex: number | null = null;
+        for (let i = 0; i < slotOffsets.length; i++) {
+          const startBeat = slotOffsets[i];
+          const duration = slotDurations[i] ?? 0;
+          const endBeat = startBeat + duration;
+          if (duration <= 0) {
+            continue;
+          }
+          if (elapsedBeats >= startBeat && elapsedBeats < endBeat) {
+            foundIndex = i;
+            break;
+          }
+          if (elapsedBeats < startBeat && foundIndex === null) {
+            foundIndex = i;
+            break;
+          }
+        }
+        activeSlotIndex = foundIndex;
+      }
+      visualRafHandle = requestAnimationFrame(tick);
+    };
+
+    visualRafHandle = requestAnimationFrame(tick);
+  }
+
+  function stopVisualTracking() {
+    if (visualRafHandle !== null) {
+      cancelAnimationFrame(visualRafHandle);
+      visualRafHandle = null;
+    }
+    activeSlotIndex = null;
+    visualTotalBeats = 0;
+  }
+
+  function clearPreviewState() {
+    if (previewTimer) {
+      clearTimeout(previewTimer);
+      previewTimer = null;
+    }
+    previewLaneId = null;
+    previewSlotIndex = null;
+  }
+
+  function buildArrangementEvents(
+    lanes: TrackLane[],
+    current: Phrase,
+    packs: PhrasePack[],
+    offsets: number[]
+  ): PhraseEvent[] {
+    const events: PhraseEvent[] = [];
+    lanes.forEach((lane) => {
+      lane.slots.forEach((key, slotIndex) => {
+        const phrase = resolvePhraseByKey(key, current, packs);
+        if (!phrase || !phrase.events.length) return;
+        const offset = offsets[slotIndex] ?? 0;
+        phrase.events.forEach((ev) => {
+          events.push({
+            type: ev.type,
+            note: ev.note,
+            velocity: ev.velocity,
+            beat: ev.beat + offset
+          });
+        });
+      });
+    });
+    events.sort((a, b) => {
+      if (a.beat === b.beat) {
+        if (a.type === b.type) return a.note - b.note;
+        return a.type === 'noteoff' ? 1 : -1;
+      }
+      return a.beat - b.beat;
+    });
+    return events;
+  }
+
+  function updateTrackSlot(trackId: string, slotIndex: number, value: PhraseKey) {
+    trackLanes = trackLanes.map((lane) => {
+      if (lane.id !== trackId) return lane;
+      const slots = lane.slots.map((slot, idx) => (idx === slotIndex ? value : slot));
+      return { ...lane, slots };
+    });
+  }
+
+  function clearTrack(trackId: string) {
+    trackLanes = trackLanes.map((lane) =>
+      lane.id === trackId ? { ...lane, slots: Array(SLOT_COUNT).fill(null) } : lane
+    );
+  }
+
+  function setCurrentPhraseFromSlot(trackId: string, slotIndex: number) {
+    const lane = trackLanes.find((item) => item.id === trackId);
+    if (!lane) return;
+    const key = lane.slots[slotIndex];
+    const phrase = resolvePhraseByKey(key, currentPhrase, packList);
+    if (!phrase) return;
+    const phraseBpm = phrase.bpm ?? bpm;
+    currentPhrase = {
+      ...phrase,
+      id: crypto.randomUUID(),
+      bpm: phraseBpm,
+      events: cloneEvents(phrase.events)
+    };
+    clip = currentPhrase.events;
+    bpm = phraseBpm;
+    newPhraseName = currentPhrase.name;
+    midiMetadata = null;
+    midiFileName = '';
+  }
+
+  async function ensureFluidEngine() {
+    if (!browser) throw new Error('FluidSynth solo está disponible en el navegador.');
     if (!ac) {
       ac = new AudioContext({ latencyHint: 'interactive' });
+    }
+    if (!fluidEngine) {
+      fluidEngine = new FluidSynthEngine(ac);
+    }
+    try {
+      await fluidEngine.ensureInitialized();
+      fluidStatus = fluidEngine.getStatus();
+      fluidError = fluidStatus.lastError ?? null;
+      if (fluidStatus.soundFontLoaded) {
+        lastSoundFontName =
+          fluidEngine.getSoundFontName() ?? fluidStatus.soundFontName ?? lastSoundFontName;
+      }
+    } catch (err) {
+      fluidStatus = fluidEngine.getStatus();
+      fluidError =
+        (err as Error).message ?? fluidStatus.lastError ?? 'No fue posible inicializar FluidSynth.';
+      throw err;
+    }
+  }
+
+  async function changeEngineMode(mode: EngineMode) {
+    if (engineMode === mode) return;
+    await stop();
+    const previous = engineMode;
+    if (mode === 'fluid') {
+      try {
+        await ensureFluidEngine();
+        engineMode = mode;
+      } catch {
+        engineMode = previous;
+        return;
+      }
+    } else {
+      engineMode = mode;
+      fluidError = null;
+    }
+  }
+
+  async function handleEngineModeChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const mode = (select.value as EngineMode) ?? 'basic';
+    await changeEngineMode(mode);
+  }
+
+  async function handlePlaySourceChange(event: Event) {
+    const select = event.currentTarget as HTMLSelectElement;
+    const next = (select.value as PlaySource) ?? 'arrangement';
+    if (playSource === next) return;
+    playSource = next;
+    if (isPlaying) {
+      await stop();
+    }
+  }
+
+  async function setup() {
+    if (!browser) return;
+    if (!ac) {
+      ac = new AudioContext({ latencyHint: 'interactive' });
+    }
+    if (engineMode === 'fluid') {
+      await ensureFluidEngine();
+      return;
+    }
+    if (!worklet) {
       await ac.audioWorklet.addModule('/engine.worklet.js');
       worklet = new AudioWorkletNode(ac, 'doremix-synth');
       worklet.connect(ac.destination);
     }
   }
 
-  function scheduleClip() {
-    if (!clip.length) return;
-    const secPerBeat = 60 / bpm;
-    const start = ac.currentTime + 0.1; // small offset
-    const events = clip.map((ev) => ({
+  function scheduleEvents(eventsSource: PhraseEvent[], bpmValue = bpm): number | null {
+    if (!ac || !worklet || !eventsSource.length) return null;
+    const secPerBeat = 60 / bpmValue;
+    const start = ac.currentTime + 0.1;
+    const events = eventsSource.map((ev) => ({
       t: start + ev.beat * secPerBeat,
       type: ev.type,
       note: ev.note,
       velocity: ev.velocity ?? 0
     }));
     worklet.port.postMessage({ type: 'schedule', events });
+    return start;
   }
 
   async function play() {
+    await stop();
     await setup();
+    if (!ac) return;
     await ac.resume();
-    isPlaying = true;
-    scheduleClip();
+    const sourceEvents = playSource === 'arrangement' ? arrangementEvents : clip;
+    if (!sourceEvents.length) return;
+    if (engineMode === 'fluid') {
+      if (!fluidEngine) {
+        fluidError = 'FluidSynth no está inicializado.';
+        return;
+      }
+      if (!fluidStatus.soundFontLoaded) {
+        fluidError = 'Carga un SoundFont GM (.sf2) antes de reproducir.';
+        return;
+      }
+      try {
+        const start = await fluidEngine.playClip(sourceEvents, bpm);
+        startVisualTracking(playSource, start);
+        fluidStatus = fluidEngine.getStatus();
+        fluidError = fluidStatus.lastError ?? null;
+        isPlaying = true;
+      } catch (err) {
+        fluidError =
+          (err as Error).message ??
+          fluidEngine.getStatus().lastError ??
+          'Error al reproducir con FluidSynth.';
+      }
+      return;
+    }
+    const start = scheduleEvents(sourceEvents);
+    if (start !== null) {
+      startVisualTracking(playSource, start);
+      isPlaying = true;
+    }
   }
 
-  function stop() {
+  async function stop() {
+    stopVisualTracking();
+    clearPreviewState();
     if (!ac) return;
+    if (engineMode === 'fluid') {
+      if (fluidEngine) {
+        await fluidEngine.stop();
+      }
+      isPlaying = false;
+      return;
+    }
+    if (!worklet) {
+      isPlaying = false;
+      return;
+    }
     worklet.port.postMessage({ type: 'allnotesoff' });
     isPlaying = false;
+  }
+
+  async function previewTrackSlot(laneId: string, slotIndex: number) {
+    const lane = trackLanes.find((item) => item.id === laneId);
+    if (!lane) return;
+    const key = lane.slots[slotIndex];
+    const phrase = resolvePhraseByKey(key, currentPhrase, packList);
+    if (!phrase || !phrase.events.length) return;
+    const phraseBpm = phrase.bpm ?? bpm;
+    const events = cloneEvents(phrase.events);
+    const durationBeats = estimatePhraseDurationBeats(phrase);
+    const durationMs = durationBeats > 0 ? (durationBeats * 60_000) / phraseBpm : 0;
+
+    await stop();
+    await setup();
+    if (!ac) return;
+    await ac.resume();
+
+    clearPreviewState();
+    previewLaneId = laneId;
+    previewSlotIndex = slotIndex;
+
+    try {
+      if (engineMode === 'fluid') {
+        if (!fluidEngine) {
+          fluidError = 'FluidSynth no está inicializado.';
+          return;
+        }
+        await fluidEngine.playClip(events, phraseBpm);
+        fluidStatus = fluidEngine.getStatus();
+        fluidError = fluidStatus.lastError ?? null;
+      } else {
+        const start = scheduleEvents(events, phraseBpm);
+        if (start === null) {
+          previewLaneId = null;
+          previewSlotIndex = null;
+          isPlaying = false;
+          return;
+        }
+      }
+      isPlaying = true;
+      const timeoutMs = Math.max(durationMs + 200, 600);
+      previewTimer = setTimeout(() => {
+        if (previewLaneId === laneId && previewSlotIndex === slotIndex) {
+          previewLaneId = null;
+          previewSlotIndex = null;
+          isPlaying = false;
+        }
+        previewTimer = null;
+      }, timeoutMs);
+    } catch (err) {
+      previewLaneId = null;
+      previewSlotIndex = null;
+      isPlaying = false;
+      fluidError =
+        (err as Error).message ??
+        fluidEngine?.getStatus().lastError ??
+        'Error al previsualizar la frase.';
+    }
+  }
+
+  async function handleSoundFontSelect(event: Event) {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input?.files?.[0];
+    if (!file) return;
+    try {
+      await ensureFluidEngine();
+    } catch {
+      input.value = '';
+      return;
+    }
+    if (!fluidEngine) return;
+    soundFontLoading = true;
+    fluidError = null;
+    try {
+      await fluidEngine.loadSoundFontFromFile(file);
+      fluidStatus = fluidEngine.getStatus();
+      fluidError = fluidStatus.lastError ?? null;
+      lastSoundFontName = fluidEngine.getSoundFontName() ?? file.name;
+    } catch (err) {
+      fluidStatus = fluidEngine.getStatus();
+      fluidError =
+        (err as Error).message ??
+        fluidStatus.lastError ??
+        'No fue posible cargar el SoundFont.';
+    } finally {
+      soundFontLoading = false;
+      input.value = '';
+    }
+  }
+
+  async function handleLoadDefaultSoundFont() {
+    try {
+      await ensureFluidEngine();
+    } catch {
+      return;
+    }
+    if (!fluidEngine) return;
+    soundFontLoading = true;
+    fluidError = null;
+    try {
+      await fluidEngine.loadSoundFontFromUrl(defaultSoundFontPath, 'gm.sf2');
+      fluidStatus = fluidEngine.getStatus();
+      fluidError = fluidStatus.lastError ?? null;
+      lastSoundFontName =
+        fluidEngine.getSoundFontName() ??
+        fluidStatus.soundFontName ??
+        'gm.sf2';
+    } catch (err) {
+      fluidStatus = fluidEngine.getStatus();
+      fluidError =
+        (err as Error).message ??
+        fluidStatus.lastError ??
+        'No se pudo cargar el SoundFont predeterminado.';
+    } finally {
+      soundFontLoading = false;
+    }
   }
 
   async function handleSaveNewPack() {
@@ -153,7 +763,7 @@
       bpm = phraseBpm;
       newPhraseName = phrase.name;
       if (isPlaying) {
-        stop();
+        await stop();
         await play();
       }
     } catch (err) {
@@ -209,7 +819,7 @@
       bpm = phraseBpm;
       newPhraseName = phraseName;
       if (isPlaying) {
-        stop();
+        await stop();
         await play();
       }
       midiMetadata = parsed.metadata;
@@ -238,14 +848,175 @@
   <h1 style="font-size:2rem; font-weight:700; margin-bottom:1rem;">DoReMix — PWA (SvelteKit)</h1>
   <p style="opacity:0.8; margin-bottom:1.5rem;">Demo: reproduce un pequeño "clip" de 1 compás con un sintetizador en AudioWorklet.</p>
 
-  <div style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem;">
+  <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;">
+    <h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Motor de sonido</h2>
+    <div style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center; margin-bottom:0.8rem;">
+      <label for="engine-mode" style="min-width:8rem;">Modo</label>
+      <select
+        id="engine-mode"
+        value={engineMode}
+        on:change={handleEngineModeChange}
+        style="flex:0 1 240px; min-width:200px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+      >
+        <option value="basic">Motor interno (seno simple)</option>
+        <option value="fluid">FluidSynth + SoundFont GM</option>
+      </select>
+      {#if engineMode === 'fluid'}
+        <span style="opacity:0.7;">{currentSoundFontLabel}</span>
+      {/if}
+    </div>
+    {#if engineMode === 'fluid'}
+      {#if fluidError}
+        <p style="color:#ff6b6b; margin:0 0 0.6rem 0;">{fluidError}</p>
+      {/if}
+      <div style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center;">
+        <label for="soundfont-file" style="min-width:12rem;">Cargar SoundFont (.sf2/.sf3)</label>
+        <input
+          id="soundfont-file"
+          type="file"
+          accept=".sf2,.sf3"
+          on:change={handleSoundFontSelect}
+          disabled={soundFontLoading}
+          style="flex:1 1 220px; min-width:200px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+        />
+        <button
+          type="button"
+          on:click={handleLoadDefaultSoundFont}
+          disabled={soundFontLoading}
+          style="padding:0.55rem 1.1rem; border-radius:10px; background:#444; color:#fff; border:0;"
+        >
+          {soundFontLoading ? 'Cargando…' : 'Usar /fluidsynth/gm.sf2'}
+        </button>
+      </div>
+      <p style="opacity:0.65; margin:0.6rem 0 0 0;">
+        Coloca <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">fluidsynth.js</code>,
+        <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">fluidsynth.wasm</code> y un SoundFont GM en <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">static/fluidsynth/</code>, o carga uno manualmente.
+      </p>
+    {/if}
+  </section>
+
+  <div style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;">
     <label for="bpm-input">BPM</label>
     <input id="bpm-input" type="number" bind:value={bpm} min="40" max="240" style="width:5rem; padding:0.4rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;" />
-    <button on:click={play} disabled={isPlaying} style="padding:0.6rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;">Play</button>
+    <label for="play-source">Reproducir</label>
+    <select
+      id="play-source"
+      value={playSource}
+      on:change={handlePlaySourceChange}
+      style="flex:0 1 220px; min-width:180px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+    >
+      <option value="arrangement">Secuencia (todas las pistas)</option>
+      <option value="phrase">Solo frase actual</option>
+    </select>
+    <button on:click={play} disabled={isPlaying || isPlayDisabled} style="padding:0.6rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;">Play</button>
     <button on:click={stop} disabled={!isPlaying} style="padding:0.6rem 1rem; border-radius:10px; background:#444; color:#fff; border:0;">Stop</button>
   </div>
+  {#if engineMode === 'fluid' && !fluidStatus.soundFontLoaded}
+    <p style="opacity:0.65; margin:-0.5rem 0 1.5rem 0;">Carga un SoundFont para habilitar la reproducción con FluidSynth.</p>
+  {/if}
 
   <p style="opacity:0.7; margin-bottom:1.5rem;">Frase actual: {currentPhraseLabel}</p>
+
+  <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:1000px; margin-bottom:2rem;">
+    <h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Secuenciador por pistas</h2>
+    <p style="opacity:0.75; margin:0 0 0.8rem 0;">
+      Organiza hasta {SLOT_COUNT} compases (4 beats cada uno). Compases activos: {arrangementActiveBars}/{SLOT_COUNT}.
+    </p>
+    <div style="overflow:auto;">
+      <table style="width:100%; border-collapse:collapse; min-width:720px;">
+        <thead>
+          <tr>
+            <th scope="col" style="text-align:left; padding:0.4rem 0.6rem; font-weight:600; opacity:0.8; border-bottom:1px solid #333;">Pista</th>
+            {#each slotIndices as idx}
+              <th scope="col" style="text-align:center; padding:0.4rem 0.6rem; font-weight:600; opacity:0.7; border-bottom:1px solid #333;">Compás {idx + 1}</th>
+            {/each}
+          </tr>
+        </thead>
+        <tbody>
+          {#each trackLanes as lane}
+            <tr>
+              <th scope="row" style="padding:0.6rem; text-align:left; border-bottom:1px solid #222;">
+                <div style="display:flex; align-items:center; gap:0.6rem;">
+                  <span aria-hidden="true" style={`display:inline-block; width:0.9rem; height:0.9rem; border-radius:999px; background:${lane.color};`}></span>
+                  <span>{lane.name}</span>
+                  <button
+                    type="button"
+                    on:click={() => clearTrack(lane.id)}
+                    style="margin-left:auto; padding:0.25rem 0.6rem; border-radius:999px; font-size:0.75rem; background:#1f1f1f; color:#ddd; border:1px solid #333;"
+                  >
+                    Vaciar pista
+                  </button>
+                </div>
+              </th>
+              {#each slotIndices as slotIndex}
+                <td
+                  style={`padding:0.6rem; border-bottom:1px solid #222; background:${
+                    playSource === 'arrangement' && activeSlotIndex === slotIndex
+                      ? 'rgba(44,126,252,0.2)'
+                      : previewLaneId === lane.id && previewSlotIndex === slotIndex
+                      ? 'rgba(34,211,238,0.18)'
+                      : 'transparent'
+                  }; transition:background 0.2s ease;`}
+                >
+                  <div style="display:flex; flex-direction:column; gap:0.35rem;">
+                    <select
+                      value={lane.slots[slotIndex] ?? ''}
+                      on:change={(event) =>
+                        updateTrackSlot(
+                          lane.id,
+                          slotIndex,
+                          (event.currentTarget as HTMLSelectElement).value || null
+                        )}
+                      style="padding:0.35rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+                    >
+                      <option value="">— Vacío —</option>
+                      <optgroup label="Frase actual">
+                        <option value="current">{currentOptionLabel}</option>
+                      </optgroup>
+                      {#if packOptionEntries.length}
+                        <optgroup label="Packs guardados">
+                          {#each packOptionEntries.filter((option) => optionAllowedForLane(option, lane)) as option}
+                            <option value={option.key}>{option.label}</option>
+                          {/each}
+                        </optgroup>
+                      {/if}
+                      <optgroup label="Frases base">
+                        {#each builtinOptionEntries.filter((option) => optionAllowedForLane(option, lane)) as option}
+                          <option value={`builtin:${option.key}`}>{option.label}</option>
+                        {/each}
+                      </optgroup>
+                    </select>
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem;">
+                      <span style="opacity:0.6; font-size:0.75rem;">{getPhraseLabel(lane.slots[slotIndex], currentPhraseLabel, packList)}</span>
+                      <div style="display:flex; gap:0.35rem; align-items:center;">
+                        <button
+                          type="button"
+                          on:click={() => previewTrackSlot(lane.id, slotIndex)}
+                          disabled={!lane.slots[slotIndex] || isPlaying}
+                          title="Previsualizar esta frase"
+                          style="padding:0.25rem 0.5rem; border-radius:8px; background:#1e1e1e; color:#fff; border:1px solid #333; font-size:0.75rem;"
+                        >
+                          ▶
+                        </button>
+                        <button
+                          type="button"
+                          on:click={() => setCurrentPhraseFromSlot(lane.id, slotIndex)}
+                          disabled={!lane.slots[slotIndex]}
+                          style="padding:0.25rem 0.6rem; border-radius:8px; background:#2c7efc; color:#fff; border:0; font-size:0.75rem;"
+                        >
+                          Editar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </td>
+              {/each}
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+  </section>
 
   <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;">
     <h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Importar SMF (.mid)</h2>
