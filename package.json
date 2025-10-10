@@ -1,0 +1,22 @@
+{
+  "name": "doremix-pwa-sveltekit",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite dev",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@sveltejs/kit": "latest",
+    "svelte": "latest"
+  },
+  "devDependencies": {
+    "@types/workbox-window": "latest",
+    "typescript": "latest",
+    "vite": "latest",
+    "@sveltejs/vite-plugin-svelte": "latest",
+    "vite-plugin-pwa": "latest"
+  }
+}
