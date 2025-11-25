@@ -39,7 +39,6 @@ declare module '$env/static/private' {
 	export const npm_node_execpath: string;
 	export const SHLVL: string;
 	export const npm_config_noproxy: string;
-	export const IBUS_NO_SNOOPER_APPS: string;
 	export const HOME: string;
 	export const CHROME_DESKTOP: string;
 	export const TERM_PROGRAM_VERSION: string;
@@ -47,7 +46,6 @@ declare module '$env/static/private' {
 	export const DESKTOP_SESSION: string;
 	export const npm_package_json: string;
 	export const QT_STYLE_OVERRIDE: string;
-	export const GIO_LAUNCHED_DESKTOP_FILE: string;
 	export const GTK_MODULES: string;
 	export const XDG_SEAT_PATH: string;
 	export const E_BIN_DIR: string;
@@ -61,7 +59,6 @@ declare module '$env/static/private' {
 	export const DBUS_SESSION_BUS_ADDRESS: string;
 	export const COLORTERM: string;
 	export const E_IPC_SOCKET: string;
-	export const GIO_LAUNCHED_DESKTOP_FILE_PID: string;
 	export const COLOR: string;
 	export const NVM_DIR: string;
 	export const QT_QPA_PLATFORMTHEME: string;
@@ -172,7 +169,6 @@ declare module '$env/dynamic/private' {
 		npm_node_execpath: string;
 		SHLVL: string;
 		npm_config_noproxy: string;
-		IBUS_NO_SNOOPER_APPS: string;
 		HOME: string;
 		CHROME_DESKTOP: string;
 		TERM_PROGRAM_VERSION: string;
@@ -180,7 +176,6 @@ declare module '$env/dynamic/private' {
 		DESKTOP_SESSION: string;
 		npm_package_json: string;
 		QT_STYLE_OVERRIDE: string;
-		GIO_LAUNCHED_DESKTOP_FILE: string;
 		GTK_MODULES: string;
 		XDG_SEAT_PATH: string;
 		E_BIN_DIR: string;
@@ -194,7 +189,6 @@ declare module '$env/dynamic/private' {
 		DBUS_SESSION_BUS_ADDRESS: string;
 		COLORTERM: string;
 		E_IPC_SOCKET: string;
-		GIO_LAUNCHED_DESKTOP_FILE_PID: string;
 		COLOR: string;
 		NVM_DIR: string;
 		QT_QPA_PLATFORMTHEME: string;

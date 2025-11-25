@@ -63,6 +63,11 @@ type FluidSynthModule = {
   _malloc: (size: number) => number;
   _free: (ptr: number) => void;
   HEAPF32: Float32Array;
+  FS?: {
+    mkdirTree?: (path: string) => void;
+    writeFile?: (path: string, data: Uint8Array | ArrayBufferView, opts?: any) => void;
+    unlink?: (path: string) => void;
+  };
   FS_createPath: (parent: string, name: string, canRead: boolean, canWrite: boolean) => void;
   FS_createDataFile: (
     parent: string,
@@ -368,25 +373,22 @@ export class FluidSynthEngine {
     }
     this.functions.setNum(this.settingsPtr, 'synth.sample-rate', this.audioContext.sampleRate);
     this.functions.setNum(this.settingsPtr, 'synth.gain', 0.8);
-    this.functions.setNum(this.settingsPtr, 'synth.polyphony', 128);
 
+    // polyphony es un entero; usar setInt si está disponible para evitar logs de error.
+    if (this.functions.setInt) {
+      const result = this.functions.setInt(this.settingsPtr, 'synth.polyphony', 128);
+      if (result !== 0) {
+        console.warn('FluidSynth no admite la opción synth.polyphony en este build, se omite.');
+      }
+    }
     if (this.functions.setInt) {
       this.functions.setInt(this.settingsPtr, 'synth.threadsafe-api', 0);
     }
-    if (this.functions.setStr) {
-      this.functions.setStr(this.settingsPtr, 'synth.cpu-cores', '1');
-    }
+    // Evitamos configurar synth.cpu-cores porque algunos builds Emscripten no lo soportan y sólo genera logs de error.
 
     this.synthPtr = this.functions.newSynth(this.settingsPtr);
     if (!this.synthPtr) {
       throw new Error('No se pudo crear la instancia de FluidSynth.');
-    }
-
-    if (this.functions.programReset) {
-      this.functions.programReset(this.synthPtr);
-    }
-    if (this.functions.systemReset) {
-      this.functions.systemReset(this.synthPtr);
     }
 
     this.leftPtr = this.module._malloc(this.blockSize * Float32Array.BYTES_PER_ELEMENT);
@@ -402,15 +404,48 @@ export class FluidSynthEngine {
       throw new Error('FluidSynth no está inicializado.');
     }
 
+    const fs = this.module.FS;
+    const createPath: ((parent: string, name: string, canRead?: boolean, canWrite?: boolean) => void) | null =
+      this.module.FS_createPath ??
+      (fs?.mkdirTree
+        ? (parent: string, name: string) => {
+            const base = parent.replace(/\/$/, '');
+            const target = name ? `${base}/${name}` : base || '/';
+            fs.mkdirTree(target);
+          }
+        : null);
+    const writeFile: ((
+      parent: string,
+      name: string,
+      data: Uint8Array,
+      canRead?: boolean,
+      canWrite?: boolean,
+      canOwn?: boolean
+    ) => void) | null =
+      this.module.FS_createDataFile ??
+      (fs?.writeFile
+        ? (parent: string, name: string, data: Uint8Array) => {
+            const base = parent.replace(/\/$/, '');
+            const target = `${base || ''}/${name}`.replace(/\/\//g, '/');
+            fs.writeFile(target, data, { canOwn: true });
+          }
+        : null);
+
+    if (!createPath || !writeFile) {
+      throw new Error(
+        'Este build de FluidSynth no expone FS (FS_createPath/FS_createDataFile). Vuelve a compilar con soporte de sistema de archivos.'
+      );
+    }
+
     if (!this.fsReady) {
-      this.module.FS_createPath('/', this.soundFontsPath.replace(/^\//, ''), true, true);
+      createPath('/', this.soundFontsPath.replace(/^\//, ''), true, true);
       this.fsReady = true;
     }
 
     const sanitized = sanitizeFileName(name || 'soundfont.sf2');
     const uniqueName = `${Date.now()}-${sanitized}`;
     const dir = this.soundFontsPath.replace(/^\//, '');
-    this.module.FS_createDataFile(dir ? `/${dir}` : '/', uniqueName, new Uint8Array(buffer), true, true, false);
+    writeFile(dir ? `/${dir}` : '/', uniqueName, new Uint8Array(buffer), true, true, false);
     const fullPath = `${this.soundFontsPath}/${uniqueName}`;
 
     if (this.soundFontInfo && this.functions.sfunload) {
@@ -430,8 +465,15 @@ export class FluidSynthEngine {
     }
     this.soundFontInfo = { id: sfId, path: fullPath, name };
 
+    // Reinicia el estado del sinte ahora que existe un SoundFont cargado, evitando warnings previos.
+    if (this.functions.programReset) {
+      this.functions.programReset(this.synthPtr);
+    }
+    if (this.functions.systemReset) {
+      this.functions.systemReset(this.synthPtr);
+    }
     if (this.functions.programSelect) {
-      // Selecciona el primer preset GM por defecto
+      // Selecciona el primer preset GM por defecto en el canal principal.
       this.functions.programSelect(this.synthPtr, this.channel, sfId, 0, 0);
     }
 

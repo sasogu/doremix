@@ -160,9 +160,9 @@
       mode: 'drums',
       label: 'Batería (DrumRNN)',
       modelName: 'Drums kit RNN',
-      baseUrl: 'https://storage.googleapis.com/magentadata/js/checkpoints/drums_kit_rnn',
+      baseUrl: 'https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/drum_kit_rnn',
       downloadUrl:
-        'https://storage.googleapis.com/magentadata/js/checkpoints/drums_kit_rnn/config.json',
+        'https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/drum_kit_rnn/config.json',
       modelType: 'rnn',
       sizeMb: 11,
       helper: 'Genera baterías de 1-2 compases.'
@@ -225,6 +225,13 @@
   $: aiProgressPercent =
     aiBytesTotal > 0 ? Math.min(100, Math.round((aiBytesLoaded / aiBytesTotal) * 100)) : 0;
   $: currentAiModel = aiModels.find((item) => item.mode === aiMode) ?? aiModels[0];
+  $: if (!aiBusy && aiReadyForMode === aiMode && aiProgressStage !== 'ready') {
+    aiProgressStage = 'ready';
+    if (!aiBytesLoaded) {
+      aiBytesLoaded = currentAiModel.sizeMb * 1_000_000;
+      aiBytesTotal = aiBytesLoaded;
+    }
+  }
   $: if (aiReadyForMode && aiReadyForMode !== aiMode && aiProgressStage === 'ready') {
     aiProgressStage = 'idle';
     aiBytesLoaded = 0;
@@ -927,6 +934,7 @@
     });
     worker.onmessage = (event: MessageEvent<AiWorkerResponse>) => {
       const msg = event.data;
+      console.debug('[AI main] mensaje recibido del worker', msg);
       if (msg.type === 'progress') {
         aiProgressStage = msg.stage;
         aiBytesLoaded = msg.loaded;
@@ -942,13 +950,32 @@
         return;
       }
       if (msg.type === 'generated') {
-        const generated = quantizedSequenceToPhrase(msg.sequence, 'Frase IA');
-        currentPhrase = { ...generated };
-        clip = currentPhrase.events;
-        bpm = currentPhrase.bpm ?? bpm;
-        newPhraseName = currentPhrase.name;
-        aiBusy = false;
-        aiModalOpen = false;
+        try {
+          const generated = quantizedSequenceToPhrase(msg.sequence, 'Frase IA');
+          const events = [...generated.events];
+          currentPhrase = { ...generated, events };
+          clip = events;
+          bpm = currentPhrase.bpm ?? bpm;
+          newPhraseName = currentPhrase.name;
+          playSource = 'phrase';
+          aiModalOpen = false;
+          aiError = null;
+          console.debug('[AI main] frase IA aplicada', {
+            events: events.length,
+            bpm: currentPhrase.bpm
+          });
+          // Auto-preview la frase generada (no bloqueante).
+          stop()
+            .then(() => play())
+            .catch((err) => console.warn('[AI main] no se pudo reproducir automáticamente', err));
+        } catch (err) {
+          console.error('[AI main] error al convertir secuencia IA', err);
+          aiError =
+            (err as Error).message ??
+            'No fue posible interpretar la secuencia generada por la IA.';
+        } finally {
+          aiBusy = false;
+        }
         return;
       }
       if (msg.type === 'cancelled') {
@@ -958,7 +985,9 @@
       if (msg.type === 'error') {
         aiError = msg.message;
         aiBusy = false;
+        return;
       }
+      console.warn('[AI main] mensaje desconocido del worker', msg);
     };
     aiWorker = worker;
     return worker;
@@ -967,8 +996,9 @@
   async function openAiModal() {
     aiModalOpen = true;
     aiError = null;
-    // Mantén progreso previo si ya estaba listo para informar al usuario que está cacheado.
-    if (aiProgressStage !== 'ready') {
+    aiBusy = false;
+    // Mantén progreso previo si ya estaba listo para el modo actual; si no, reinicia.
+    if (!(aiProgressStage === 'ready' && aiReadyForMode === aiMode)) {
       aiProgressStage = 'idle';
       aiBytesLoaded = 0;
       aiBytesTotal = 0;
@@ -1001,6 +1031,13 @@
     aiBusy = true;
     aiProgressStage = 'ready';
     aiBytesLoaded = aiBytesLoaded || 0;
+    console.debug('[AI] Generar clicked', {
+      aiBusy,
+      aiProgressStage,
+      aiReadyForMode,
+      aiBytesLoaded,
+      aiBytesTotal
+    });
     const worker = await ensureAiWorker();
     const seed = phraseToQuantizedSequence(currentPhrase);
     worker.postMessage({
@@ -1009,6 +1046,11 @@
       mode: aiMode === 'drums' ? 'drum' : 'melody',
       url: currentAiModel.baseUrl,
       modelType: currentAiModel.modelType
+    });
+    console.debug('[AI] Mensaje de generación enviado al worker', {
+      mode: aiMode,
+      modelType: currentAiModel.modelType,
+      url: currentAiModel.baseUrl
     });
   }
 
@@ -1454,7 +1496,7 @@
           <button
             type="button"
             on:click={handleAiGenerate}
-            disabled={aiBusy || aiProgressStage !== 'ready'}
+            disabled={aiBusy}
             style="padding:0.55rem 1rem; border-radius:10px; background:#22d3ee; color:#0b0b0b; border:0;"
           >
             Generar {aiMode === 'drums' ? 'batería' : 'melodía'}
