@@ -26,7 +26,7 @@ npm run preview
 
 ## FluidSynth + SoundFont GM
 
-1. Descarga los binarios de FluidSynth compilados para WebAssembly (`fluidsynth.js` + `fluidsynth.wasm`) y colócalos en `static/fluidsynth/`.
+1. Descarga los binarios de FluidSynth compilados para WebAssembly (`libfluidsynth-*.js` + `libfluidsynth-*.wasm`, por ejemplo `libfluidsynth-2.3.0.{js,wasm}`) y colócalos en `static/fluidsynth/`.
 2. Añade un SoundFont General MIDI (`gm.sf2` o `.sf3`) en la misma carpeta o cárgalo desde la app mediante el selector de archivos.
 3. En la demo, selecciona el motor **FluidSynth + SoundFont GM**, carga el SoundFont y reproduce cualquier frase MIDI o pack almacenado.
 

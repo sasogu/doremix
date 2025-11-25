@@ -19,6 +19,11 @@
     getBuiltinPhraseByKey,
     type PhraseCategory
   } from '$lib/sequencer/builtinPhrases';
+  import {
+    phraseToQuantizedSequence,
+    quantizedSequenceToPhrase,
+    type QuantizedNoteSequence
+  } from '$lib/ai/noteSequenceAdapters';
 
   type EngineMode = 'basic' | 'fluid';
   type PlaySource = 'arrangement' | 'phrase';
@@ -64,10 +69,11 @@
     soundFontName: undefined,
     lastError: null
   };
+  let triedAutoLoadDefaultSf = false;
   let fluidError: string | null = null;
   let soundFontLoading = false;
   let lastSoundFontName = '';
-  const defaultSoundFontPath = '/fluidsynth/gm.sf2';
+  const defaultSoundFontPath = '/fluidsynth/GeneralUser-GS.sf2';
 
   let bpm = 120;
   let isPlaying = false;
@@ -108,6 +114,63 @@
   let midiMetadata: SMFMetadata | null = null;
   let midiLoading = false;
   let midiFileName = '';
+
+  type AiProgressStage = 'idle' | 'downloading' | 'ready';
+  type AiWorkerResponse =
+    | { type: 'progress'; stage: 'downloading'; loaded: number; total: number }
+    | { type: 'model-loaded'; bytes: number; fromCache: boolean }
+    | { type: 'generated'; sequence: QuantizedNoteSequence }
+    | { type: 'cancelled' }
+    | { type: 'error'; message: string };
+
+  let aiWorker: Worker | null = null;
+  let aiModalOpen = false;
+  let aiBusy = false;
+  let aiError: string | null = null;
+  let aiProgressStage: AiProgressStage = 'idle';
+  let aiBytesLoaded = 0;
+  let aiBytesTotal = 0;
+  let aiProgressPercent = 0;
+  let aiReadyForMode: AiMode | null = null;
+  type AiMode = 'melody' | 'drums';
+  type AiModelOption = {
+    mode: AiMode;
+    label: string;
+    modelName: string;
+    baseUrl: string;
+    downloadUrl: string;
+    modelType: 'vae' | 'rnn';
+    sizeMb: number;
+    disabled?: boolean;
+    helper?: string;
+  };
+
+  const aiModels: AiModelOption[] = [
+    {
+      mode: 'melody',
+      label: 'Melodía (MusicVAE 16 compases)',
+      modelName: 'MusicVAE mel_16bar_small_q2',
+      baseUrl: 'https://storage.googleapis.com/magentadata/js/checkpoints/music_vae/mel_16bar_small_q2',
+      downloadUrl:
+        'https://storage.googleapis.com/magentadata/js/checkpoints/music_vae/mel_16bar_small_q2/config.json',
+      modelType: 'vae',
+      sizeMb: 31
+    },
+    {
+      mode: 'drums',
+      label: 'Batería (DrumRNN)',
+      modelName: 'Drums kit RNN',
+      baseUrl: 'https://storage.googleapis.com/magentadata/js/checkpoints/drums_kit_rnn',
+      downloadUrl:
+        'https://storage.googleapis.com/magentadata/js/checkpoints/drums_kit_rnn/config.json',
+      modelType: 'rnn',
+      sizeMb: 11,
+      helper: 'Genera baterías de 1-2 compases.'
+    }
+  ];
+
+  let aiMode: AiMode = 'melody';
+  let currentAiModel: AiModelOption = aiModels[0];
 
   let packList: PhrasePack[] = [];
   let packOptionEntries: PhraseOptionEntry[] = [];
@@ -159,6 +222,15 @@
   $: currentSoundFontLabel = fluidStatus.soundFontLoaded
     ? fluidStatus.soundFontName ?? lastSoundFontName ?? 'SoundFont cargado'
     : 'Sin SoundFont cargado';
+  $: aiProgressPercent =
+    aiBytesTotal > 0 ? Math.min(100, Math.round((aiBytesLoaded / aiBytesTotal) * 100)) : 0;
+  $: currentAiModel = aiModels.find((item) => item.mode === aiMode) ?? aiModels[0];
+  $: if (aiReadyForMode && aiReadyForMode !== aiMode && aiProgressStage === 'ready') {
+    aiProgressStage = 'idle';
+    aiBytesLoaded = 0;
+    aiBytesTotal = 0;
+    aiReadyForMode = null;
+  }
 
   function createInitialArrangement(): TrackLane[] {
     return [
@@ -465,6 +537,22 @@
       await fluidEngine.ensureInitialized();
       fluidStatus = fluidEngine.getStatus();
       fluidError = fluidStatus.lastError ?? null;
+      if (!fluidStatus.soundFontLoaded && !triedAutoLoadDefaultSf) {
+        triedAutoLoadDefaultSf = true;
+        try {
+          await fluidEngine.loadSoundFontFromUrl(defaultSoundFontPath, 'GeneralUser-GS.sf2');
+          fluidStatus = fluidEngine.getStatus();
+          fluidError = fluidStatus.lastError ?? null;
+          lastSoundFontName =
+            fluidEngine.getSoundFontName() ?? fluidStatus.soundFontName ?? 'GeneralUser-GS.sf2';
+        } catch (err) {
+          fluidStatus = fluidEngine.getStatus();
+          fluidError =
+            (err as Error).message ??
+            fluidStatus.lastError ??
+            'No se pudo cargar automáticamente el SoundFont predeterminado.';
+        }
+      }
       if (fluidStatus.soundFontLoaded) {
         lastSoundFontName =
           fluidEngine.getSoundFontName() ?? fluidStatus.soundFontName ?? lastSoundFontName;
@@ -696,13 +784,13 @@
     soundFontLoading = true;
     fluidError = null;
     try {
-      await fluidEngine.loadSoundFontFromUrl(defaultSoundFontPath, 'gm.sf2');
+      await fluidEngine.loadSoundFontFromUrl(defaultSoundFontPath, 'GeneralUser-GS.sf2');
       fluidStatus = fluidEngine.getStatus();
       fluidError = fluidStatus.lastError ?? null;
       lastSoundFontName =
         fluidEngine.getSoundFontName() ??
         fluidStatus.soundFontName ??
-        'gm.sf2';
+        'GeneralUser-GS.sf2';
     } catch (err) {
       fluidStatus = fluidEngine.getStatus();
       fluidError =
@@ -832,6 +920,104 @@
     }
   }
 
+  async function ensureAiWorker() {
+    if (aiWorker) return aiWorker;
+    const worker = new Worker(new URL('$lib/ai/generatorWorker.ts', import.meta.url), {
+      type: 'module'
+    });
+    worker.onmessage = (event: MessageEvent<AiWorkerResponse>) => {
+      const msg = event.data;
+      if (msg.type === 'progress') {
+        aiProgressStage = msg.stage;
+        aiBytesLoaded = msg.loaded;
+        aiBytesTotal = msg.total;
+        return;
+      }
+      if (msg.type === 'model-loaded') {
+        aiProgressStage = 'ready';
+        aiBytesLoaded = msg.bytes;
+        aiBytesTotal = msg.bytes;
+        aiBusy = false;
+        aiReadyForMode = aiMode;
+        return;
+      }
+      if (msg.type === 'generated') {
+        const generated = quantizedSequenceToPhrase(msg.sequence, 'Frase IA');
+        currentPhrase = { ...generated };
+        clip = currentPhrase.events;
+        bpm = currentPhrase.bpm ?? bpm;
+        newPhraseName = currentPhrase.name;
+        aiBusy = false;
+        aiModalOpen = false;
+        return;
+      }
+      if (msg.type === 'cancelled') {
+        aiBusy = false;
+        return;
+      }
+      if (msg.type === 'error') {
+        aiError = msg.message;
+        aiBusy = false;
+      }
+    };
+    aiWorker = worker;
+    return worker;
+  }
+
+  async function openAiModal() {
+    aiModalOpen = true;
+    aiError = null;
+    // Mantén progreso previo si ya estaba listo para informar al usuario que está cacheado.
+    if (aiProgressStage !== 'ready') {
+      aiProgressStage = 'idle';
+      aiBytesLoaded = 0;
+      aiBytesTotal = 0;
+    }
+    await ensureAiWorker();
+  }
+
+  function closeAiModal() {
+    aiModalOpen = false;
+  }
+
+  async function handleAiDownload() {
+    aiError = null;
+    aiBusy = true;
+    aiProgressStage = 'downloading';
+    aiBytesLoaded = 0;
+    aiBytesTotal = 0;
+    aiReadyForMode = null;
+    const worker = await ensureAiWorker();
+    worker.postMessage({
+      type: 'load-model',
+      url: currentAiModel.downloadUrl,
+      modelBase: currentAiModel.baseUrl,
+      modelType: currentAiModel.modelType
+    });
+  }
+
+  async function handleAiGenerate() {
+    aiError = null;
+    aiBusy = true;
+    aiProgressStage = 'ready';
+    aiBytesLoaded = aiBytesLoaded || 0;
+    const worker = await ensureAiWorker();
+    const seed = phraseToQuantizedSequence(currentPhrase);
+    worker.postMessage({
+      type: 'generate',
+      seed,
+      mode: aiMode === 'drums' ? 'drum' : 'melody',
+      url: currentAiModel.baseUrl,
+      modelType: currentAiModel.modelType
+    });
+  }
+
+  async function handleAiCancel() {
+    const worker = await ensureAiWorker();
+    worker.postMessage({ type: 'cancel' });
+    aiBusy = false;
+  }
+
   onMount(async () => {
     try {
       await initPhrasePackStore();
@@ -885,12 +1071,12 @@
           disabled={soundFontLoading}
           style="padding:0.55rem 1.1rem; border-radius:10px; background:#444; color:#fff; border:0;"
         >
-          {soundFontLoading ? 'Cargando…' : 'Usar /fluidsynth/gm.sf2'}
+          {soundFontLoading ? 'Cargando…' : 'Usar /fluidsynth/GeneralUser-GS.sf2'}
         </button>
       </div>
       <p style="opacity:0.65; margin:0.6rem 0 0 0;">
-        Coloca <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">fluidsynth.js</code>,
-        <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">fluidsynth.wasm</code> y un SoundFont GM en <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">static/fluidsynth/</code>, o carga uno manualmente.
+        Coloca <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">libfluidsynth-*.js</code>,
+        <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">libfluidsynth-*.wasm</code> y un SoundFont GM en <code style="background:#222; padding:0.1rem 0.35rem; border-radius:6px;">static/fluidsynth/</code>, o carga uno manualmente.
       </p>
     {/if}
   </section>
@@ -916,6 +1102,43 @@
   {/if}
 
   <p style="opacity:0.7; margin-bottom:1.5rem;">Frase actual: {currentPhraseLabel}</p>
+
+  <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;">
+    <h2 style="font-size:1.2rem; margin:0 0 0.5rem 0;">IA opcional (Magenta.js)</h2>
+    <p style="opacity:0.75; margin:0 0 0.8rem 0;">
+      Descarga bajo demanda y se cachea automáticamente tras el primer uso. Pensado para tablets: muestra barra de progreso y no afecta al resto de la app.
+    </p>
+    <div style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;">
+      <label for="ai-mode" style="opacity:0.8;">Modo</label>
+      <select
+        id="ai-mode"
+        bind:value={aiMode}
+        style="padding:0.45rem 0.6rem; min-width:220px; background:#181818; color:#fff; border:1px solid #333; border-radius:10px;"
+      >
+        {#each aiModels as option}
+          <option value={option.mode} disabled={option.disabled}>{option.label}</option>
+        {/each}
+      </select>
+      <span style="opacity:0.75; font-size:0.9rem;">Modelo: {currentAiModel.modelName} (~{currentAiModel.sizeMb} MB)</span>
+      <button
+        type="button"
+        on:click={openAiModal}
+        style="padding:0.6rem 1rem; border-radius:10px; background:#8b5cf6; color:#fff; border:0;"
+      >
+        Abrir panel IA
+      </button>
+      <span style="opacity:0.7; font-size:0.9rem;">
+        Estado: {aiProgressStage === 'downloading'
+          ? 'Descargando modelo…'
+          : aiProgressStage === 'ready'
+          ? 'Modelo cacheado/listo'
+          : 'Pendiente de descarga'}
+      </span>
+    </div>
+    {#if currentAiModel.helper}
+      <p style="opacity:0.6; margin:0.4rem 0 0 0;">{currentAiModel.helper}</p>
+    {/if}
+  </section>
 
   <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:1000px; margin-bottom:2rem;">
     <h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Secuenciador por pistas</h2>
@@ -1175,4 +1398,78 @@
       <li>Página de prueba + controles</li>
     </ul>
   </div>
+
+  {#if aiModalOpen}
+    <div
+      style="position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; padding:1rem; z-index:1000;"
+    >
+      <div style="background:#0f0f10; border:1px solid #333; border-radius:14px; padding:1.2rem; width: min(520px, 100%); box-shadow:0 12px 40px rgba(0,0,0,0.35);">
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:0.6rem; margin-bottom:0.6rem;">
+          <h3 style="margin:0; font-size:1.05rem;">Generación IA (Magenta opcional)</h3>
+          <button
+            type="button"
+            on:click={closeAiModal}
+            style="background:transparent; color:#fff; border:1px solid #444; border-radius:10px; padding:0.3rem 0.65rem;"
+          >
+            Cerrar
+          </button>
+        </div>
+        <p style="opacity:0.75; margin:0 0 0.8rem 0;">
+          Modo actual: {currentAiModel.label}. Descarga el modelo solo cuando lo pidas. Necesita conexión para el primer uso; después se cachea automático. Muestra barra de progreso para tablets/lento.
+        </p>
+        <div style="display:flex; flex-direction:column; gap:0.6rem; margin-bottom:0.6rem;">
+          <div style="height:12px; background:#1b1b1b; border-radius:999px; overflow:hidden; border:1px solid #222;">
+            <div
+              style={`height:100%; width:${aiProgressPercent}%; background:#8b5cf6; transition:width 0.2s ease;`}
+            ></div>
+          </div>
+          <div style="display:flex; justify-content:space-between; font-size:0.9rem; opacity:0.75;">
+            <span>
+              {aiProgressStage === 'downloading'
+                ? 'Descargando modelo…'
+                : aiProgressStage === 'ready'
+                ? 'Modelo cacheado/listo'
+                : 'Aún no descargado'}
+            </span>
+            <span>
+              {aiBytesTotal
+                ? `${(aiBytesLoaded / 1_000_000).toFixed(1)} / ${(aiBytesTotal / 1_000_000).toFixed(1)} MB`
+                : `~${currentAiModel.sizeMb} MB`}
+            </span>
+          </div>
+          {#if aiError}
+            <p style="color:#ff6b6b; margin:0;">{aiError}</p>
+          {/if}
+          <p style="opacity:0.7; margin:0;">Modelo: {currentAiModel.modelName}</p>
+        </div>
+        <div style="display:flex; gap:0.5rem; flex-wrap:wrap; align-items:center;">
+          <button
+            type="button"
+            on:click={handleAiDownload}
+            disabled={aiBusy || aiProgressStage === 'downloading'}
+            style="padding:0.55rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;"
+          >
+            {aiProgressStage === 'ready' ? 'Reintentar descarga' : aiBusy ? 'Descargando…' : 'Descargar modelo'}
+          </button>
+          <button
+            type="button"
+            on:click={handleAiGenerate}
+            disabled={aiBusy || aiProgressStage !== 'ready'}
+            style="padding:0.55rem 1rem; border-radius:10px; background:#22d3ee; color:#0b0b0b; border:0;"
+          >
+            Generar {aiMode === 'drums' ? 'batería' : 'melodía'}
+          </button>
+          <button
+            type="button"
+            on:click={handleAiCancel}
+            disabled={!aiBusy}
+            style="padding:0.55rem 1rem; border-radius:10px; background:#1f1f1f; color:#fff; border:1px solid #333;"
+          >
+            Cancelar
+          </button>
+          <span style="opacity:0.7; font-size:0.9rem;">El resultado reemplazará la frase actual.</span>
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>

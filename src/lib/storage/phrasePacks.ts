@@ -182,7 +182,7 @@ async function maybeCreateOpfsBackend(): Promise<StorageBackend | null> {
       }
     };
   } catch (err) {
-    console.warn('Fallo OPFS, usando IndexedDB', err);
+    console.info('OPFS no disponible, usando IndexedDB (esperado en entornos con sandbox)', err);
     return null;
   }
 }
@@ -248,4 +248,3 @@ export function duplicatePhrase(phrase: Phrase, overrides: Partial<Phrase> = {})
     events: overrides.events ?? phrase.events.map((ev) => ({ ...ev }))
   };
 }
-

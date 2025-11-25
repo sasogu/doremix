@@ -36,6 +36,6 @@ declare module "$app/types" {
 		};
 		Pathname(): "/";
 		ResolvedPathname(): `${"" | `/${string}`}${ReturnType<AppTypes['Pathname']>}`;
-		Asset(): "/engine.worklet.js" | "/fluid-render.worklet.js" | "/icons/192.png" | "/icons/512.png" | string & {};
+		Asset(): "/engine.worklet.js" | "/favicon.png" | "/fluid-render.worklet.js" | "/fluidsynth/GeneralUser-GS.sf2" | "/fluidsynth/libfluidsynth-2.3.0.js" | "/fluidsynth/libfluidsynth-2.3.0.wasm" | "/icons/192.png" | "/icons/512.png" | string & {};
 	}
 }

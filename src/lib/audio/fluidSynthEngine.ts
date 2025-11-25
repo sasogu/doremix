@@ -76,8 +76,8 @@ type FluidSynthModule = {
   ready?: Promise<unknown>;
 };
 
-const DEFAULT_SCRIPT_URL = '/fluidsynth/fluidsynth.js';
-const DEFAULT_WASM_URL = '/fluidsynth/fluidsynth.wasm';
+const DEFAULT_SCRIPT_URL = '/fluidsynth/libfluidsynth-2.3.0.js';
+const DEFAULT_WASM_URL = '/fluidsynth/libfluidsynth-2.3.0.wasm';
 
 type TimerHandle = ReturnType<typeof setTimeout>;
 
@@ -285,14 +285,32 @@ export class FluidSynthEngine {
 
   private async ensureModule() {
     if (this.module) return this.module;
+    const scriptUrl = this.options.scriptUrl ?? DEFAULT_SCRIPT_URL;
+    const wasmUrl = this.options.wasmUrl ?? DEFAULT_WASM_URL;
+
+    // Primero intenta importar como módulo ESM (soporta builds recientes con export default).
+    try {
+      const module = await instantiateFluidSynthModule({ scriptUrl, wasmUrl });
+      if (module) {
+        if ((module as any).ready && typeof (module as any).ready.then === 'function') {
+          await (module as any).ready;
+        }
+        this.module = module as FluidSynthModule;
+        return this.module;
+      }
+    } catch (err) {
+      console.warn('Fallo al inicializar FluidSynth vía ESM, probando carga clásica', err);
+    }
+
+    // Fallback: insertar script clásico y volver a intentar.
     if (!this.scriptLoaded) {
-      this.scriptLoaded = loadFluidSynthScript(this.options.scriptUrl ?? DEFAULT_SCRIPT_URL);
+      this.scriptLoaded = loadFluidSynthScript(scriptUrl);
     }
     await this.scriptLoaded;
 
     const module = await instantiateFluidSynthModule({
-      scriptUrl: this.options.scriptUrl ?? DEFAULT_SCRIPT_URL,
-      wasmUrl: this.options.wasmUrl ?? DEFAULT_WASM_URL
+      scriptUrl,
+      wasmUrl
     });
 
     if (module.ready && typeof module.ready.then === 'function') {
@@ -475,12 +493,35 @@ async function loadFluidSynthScript(url: string) {
     script.dataset.fluidsynth = url;
     script.onload = () => resolve();
     script.onerror = () =>
-      reject(new Error(`No se pudo cargar fluidsynth.js desde ${url}. Copia los binarios en /static/fluidsynth/.`));
+      reject(
+        new Error(
+          `No se pudo cargar FluidSynth desde ${url}. Copia libfluidsynth-*.js y libfluidsynth-*.wasm en /static/fluidsynth/.`
+        )
+      );
     document.head.appendChild(script);
   });
 }
 
 async function instantiateFluidSynthModule(params: { scriptUrl: string; wasmUrl: string }) {
+  // Intenta primero como ES module (Emscripten export default).
+  try {
+    const imported = await import(/* @vite-ignore */ params.scriptUrl);
+    const moduleExport: any = imported?.default ?? imported;
+    // Si exporta una promesa (patrón Emscripten MODULARIZE=1 con export default)
+    if (moduleExport && typeof moduleExport.then === 'function') {
+      return await moduleExport;
+    }
+    // Si exporta una factoría, pásale locateFile.
+    if (typeof moduleExport === 'function') {
+      const maybe = moduleExport({
+        locateFile: (path: string) => (path.endsWith('.wasm') ? params.wasmUrl : path)
+      });
+      return maybe && typeof maybe.then === 'function' ? await maybe : maybe;
+    }
+  } catch (err) {
+    console.warn('Fallo al importar como módulo, se intenta carga clásica', err);
+  }
+
   const globalAny = globalThis as any;
   const candidates = [
     globalAny.createFluidSynthModule,
