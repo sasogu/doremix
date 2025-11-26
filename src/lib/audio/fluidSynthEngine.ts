@@ -177,11 +177,17 @@ export class FluidSynthEngine {
       const delayMs = Math.max(0, (dueTime - this.audioContext.currentTime) * 1000);
       const handle = setTimeout(() => {
         if (!this.isPlaying || this.synthPtr === null || !this.functions) return;
+        const channel = event.channel ?? this.channel;
         if (event.type === 'noteon') {
           const velocity = Math.max(0, Math.min(1, event.velocity ?? 0.8));
-          this.functions.noteOn(this.synthPtr, this.channel, event.note, Math.round(velocity * 127));
+          this.functions.noteOn(
+            this.synthPtr,
+            channel,
+            event.note,
+            Math.round(velocity * 127)
+          );
         } else if (event.type === 'noteoff') {
-          this.functions.noteOff(this.synthPtr, this.channel, event.note);
+          this.functions.noteOff(this.synthPtr, channel, event.note);
         }
       }, delayMs);
       this.pendingTimers.push(handle);

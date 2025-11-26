@@ -171,8 +171,14 @@ export function parseSMF(buffer: ArrayBuffer): ParsedSMF {
   events.sort((a, b) => a.beat - b.beat);
 
   const sanitizedEvents: PhraseEvent[] = events.map((ev) => {
-    const { channel, ...rest } = ev as PhraseEvent & { channel?: number };
-    return rest;
+    const withChannel = ev as PhraseEvent & { channel?: number };
+    return {
+      beat: withChannel.beat,
+      type: withChannel.type,
+      note: withChannel.note,
+      velocity: withChannel.velocity,
+      channel: withChannel.channel
+    };
   });
 
   const metadata: SMFMetadata = {
@@ -199,4 +205,3 @@ function readVarLength(view: DataView, offset: number) {
   } while (byte & 0x80);
   return { value, offset };
 }
-

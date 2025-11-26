@@ -6,6 +6,7 @@ export type PhraseEvent = {
   type: 'noteon' | 'noteoff';
   note: number;
   velocity?: number;
+  channel?: number;
 };
 
 export type Phrase = {

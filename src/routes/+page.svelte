@@ -24,12 +24,14 @@
     quantizedSequenceToPhrase,
     type QuantizedNoteSequence
   } from '$lib/ai/noteSequenceAdapters';
+  import PianoRoll from '$lib/components/PianoRoll.svelte';
 
   type EngineMode = 'basic' | 'fluid';
   type PlaySource = 'arrangement' | 'phrase';
   type PhraseKey = string | null;
 
   const SLOT_COUNT = 8;
+  const SLOT_BEATS = 16; // 4 compases de 4 beats por frase
   const slotIndices = Array.from({ length: SLOT_COUNT }, (_, idx) => idx);
 
   type TrackLane = {
@@ -60,7 +62,7 @@
   let worklet: AudioWorkletNode;
   let fluidEngine: FluidSynthEngine | null = null;
 
-  let engineMode: EngineMode = 'basic';
+  let engineMode: EngineMode = 'fluid';
   let playSource: PlaySource = 'arrangement';
 
   let fluidStatus: FluidSynthStatus = {
@@ -96,6 +98,7 @@
     events: cloneEvents(defaultEvents)
   };
   let clip = currentPhrase.events;
+  let rollBars = clampRollBars(Math.ceil(estimatePhraseDurationBeats(currentPhrase) / 4));
 
   let trackLanes: TrackLane[] = createInitialArrangement();
   let arrangementEvents: PhraseEvent[] = [];
@@ -132,6 +135,7 @@
   let aiBytesTotal = 0;
   let aiProgressPercent = 0;
   let aiReadyForMode: AiMode | null = null;
+  let pianoRollOpen = false;
   type AiMode = 'melody' | 'drums';
   type AiModelOption = {
     mode: AiMode;
@@ -192,6 +196,9 @@
   let previewLaneId: string | null = null;
   let previewSlotIndex: number | null = null;
   let previewTimer: ReturnType<typeof setTimeout> | null = null;
+  let playStopTimer: ReturnType<typeof setTimeout> | null = null;
+  let playheadBeat = 0;
+  let playheadTotalBeats = 0;
 
   $: packList = $phrasePacks;
   $: packsCount = packList.length;
@@ -285,6 +292,42 @@
     return events.map((ev) => ({ ...ev }));
   }
 
+  function clampRollBars(value: number) {
+    if (!Number.isFinite(value)) return 4;
+    return Math.min(8, Math.max(1, Math.round(value)));
+  }
+
+  function syncRollBarsToEvents(events: PhraseEvent[]) {
+    const beats = estimatePhraseDurationBeats({
+      id: 'tmp',
+      name: 'tmp',
+      bpm,
+      events
+    });
+    rollBars = clampRollBars(Math.ceil(beats / 4));
+  }
+
+  function applyPhrase(phrase: Phrase) {
+    const phraseBpm = phrase.bpm ?? bpm;
+    currentPhrase = {
+      ...phrase,
+      bpm: phraseBpm,
+      events: cloneEvents(phrase.events)
+    };
+    clip = currentPhrase.events;
+    bpm = phraseBpm;
+    newPhraseName = currentPhrase.name;
+    syncRollBarsToEvents(clip);
+  }
+
+  function openPianoRoll() {
+    pianoRollOpen = true;
+  }
+
+  function closePianoRoll() {
+    pianoRollOpen = false;
+  }
+
   function snapshotCurrentPhrase(nameOverride?: string): Phrase {
     return {
       id: crypto.randomUUID(),
@@ -367,17 +410,15 @@
     packs: PhrasePack[]
   ): number[] {
     return slotIndices.map((slotIndex) => {
-      let maxDuration = 0;
       let hasPhrase = false;
       for (const lane of lanes) {
         const phrase = resolvePhraseByKey(lane.slots[slotIndex], current, packs);
-        if (!phrase) continue;
-        hasPhrase = true;
-        const duration = estimatePhraseDurationBeats(phrase);
-        if (duration > maxDuration) maxDuration = duration;
+        if (phrase) {
+          hasPhrase = true;
+          break;
+        }
       }
-      if (!hasPhrase) return 0;
-      return maxDuration;
+      return hasPhrase ? SLOT_BEATS : 0;
     });
   }
 
@@ -391,6 +432,32 @@
     return offsets;
   }
 
+  function slicePhraseEvents(
+    events: PhraseEvent[],
+    bpmValue: number,
+    baseName: string,
+    chunkBeats = SLOT_BEATS
+  ): Phrase[] {
+    if (!events.length) return [];
+    const maxBeat = events.reduce((max, ev) => Math.max(max, ev.beat), 0);
+    const totalBeats = Math.max(chunkBeats, maxBeat);
+    const phrases: Phrase[] = [];
+    for (let start = 0, idx = 0; start <= totalBeats; start += chunkBeats, idx++) {
+      const end = start + chunkBeats;
+      const sliceEvents = events
+        .filter((ev) => ev.beat >= start && ev.beat < end)
+        .map((ev) => ({ ...ev, beat: ev.beat - start }));
+      if (!sliceEvents.length) continue;
+      phrases.push({
+        id: crypto.randomUUID(),
+        name: `${baseName} #${idx + 1}`,
+        bpm: bpmValue,
+        events: sliceEvents
+      });
+    }
+    return phrases;
+  }
+
   function optionAllowedForLane(option: PhraseOptionEntry, lane: TrackLane) {
     if (lane.category === 'any') return true;
     if (option.category === 'any') return true;
@@ -399,13 +466,20 @@
 
   function startVisualTracking(source: PlaySource, startTime: number) {
     stopVisualTracking();
-    if (source !== 'arrangement') return;
+    clearPlayStopTimer();
     if (!ac) return;
     visualStartTime = startTime;
     const secPerBeat = 60 / bpm;
-    const totalBeats = arrangementTotalBeats;
+    const eventsSource = source === 'arrangement' ? arrangementEvents : clip;
+    const lastBeat = eventsSource.reduce((max, ev) => Math.max(max, ev.beat), 0);
+    const rawBeats =
+      source === 'arrangement' ? arrangementTotalBeats : estimatePhraseDurationBeats(currentPhrase);
+    const totalBeats = Math.max(rawBeats || 0, lastBeat + 1, 4);
     visualTotalBeats = totalBeats;
+    playheadTotalBeats = totalBeats;
+    playheadBeat = 0;
     if (totalBeats <= 0) return;
+    schedulePlayStop(totalBeats);
 
     const tick = () => {
       if (!ac) {
@@ -416,31 +490,38 @@
       const elapsedSeconds = now - visualStartTime;
       if (elapsedSeconds < 0) {
         activeSlotIndex = null;
+        playheadBeat = 0;
       } else {
         const elapsedBeats = elapsedSeconds / secPerBeat;
+        playheadBeat = Math.min(elapsedBeats, visualTotalBeats);
         if (elapsedBeats >= visualTotalBeats) {
           activeSlotIndex = null;
-          stopVisualTracking();
+          playheadBeat = visualTotalBeats;
+          isPlaying = false;
+          clearPlayStopTimer();
+          stopVisualTracking({ keepPlayhead: true });
           return;
         }
-        let foundIndex: number | null = null;
-        for (let i = 0; i < slotOffsets.length; i++) {
-          const startBeat = slotOffsets[i];
-          const duration = slotDurations[i] ?? 0;
-          const endBeat = startBeat + duration;
-          if (duration <= 0) {
-            continue;
+        if (source === 'arrangement') {
+          let foundIndex: number | null = null;
+          for (let i = 0; i < slotOffsets.length; i++) {
+            const startBeat = slotOffsets[i];
+            const duration = slotDurations[i] ?? 0;
+            const endBeat = startBeat + duration;
+            if (duration <= 0) {
+              continue;
+            }
+            if (elapsedBeats >= startBeat && elapsedBeats < endBeat) {
+              foundIndex = i;
+              break;
+            }
+            if (elapsedBeats < startBeat && foundIndex === null) {
+              foundIndex = i;
+              break;
+            }
           }
-          if (elapsedBeats >= startBeat && elapsedBeats < endBeat) {
-            foundIndex = i;
-            break;
-          }
-          if (elapsedBeats < startBeat && foundIndex === null) {
-            foundIndex = i;
-            break;
-          }
+          activeSlotIndex = foundIndex;
         }
-        activeSlotIndex = foundIndex;
       }
       visualRafHandle = requestAnimationFrame(tick);
     };
@@ -448,13 +529,34 @@
     visualRafHandle = requestAnimationFrame(tick);
   }
 
-  function stopVisualTracking() {
+  function stopVisualTracking(options: { keepPlayhead?: boolean } = {}) {
+    const { keepPlayhead = false } = options;
     if (visualRafHandle !== null) {
       cancelAnimationFrame(visualRafHandle);
       visualRafHandle = null;
     }
     activeSlotIndex = null;
-    visualTotalBeats = 0;
+    if (!keepPlayhead) {
+      visualTotalBeats = 0;
+      playheadTotalBeats = 0;
+      playheadBeat = 0;
+    }
+  }
+
+  function clearPlayStopTimer() {
+    if (playStopTimer) {
+      clearTimeout(playStopTimer);
+      playStopTimer = null;
+    }
+  }
+
+  function schedulePlayStop(totalBeats: number) {
+    clearPlayStopTimer();
+    if (!Number.isFinite(totalBeats) || totalBeats <= 0) return;
+    const durationMs = (totalBeats * 60_000) / bpm + 200;
+    playStopTimer = setTimeout(() => {
+      stop({ keepPlayhead: true });
+    }, durationMs);
   }
 
   function clearPreviewState() {
@@ -472,6 +574,7 @@
     packs: PhrasePack[],
     offsets: number[]
   ): PhraseEvent[] {
+    const channelForLane = (lane: TrackLane) => (lane.category === 'perc' ? 9 : 0);
     const events: PhraseEvent[] = [];
     lanes.forEach((lane) => {
       lane.slots.forEach((key, slotIndex) => {
@@ -483,7 +586,8 @@
             type: ev.type,
             note: ev.note,
             velocity: ev.velocity,
-            beat: ev.beat + offset
+            beat: ev.beat + offset,
+            channel: ev.channel ?? channelForLane(lane)
           });
         });
       });
@@ -514,22 +618,34 @@
 
   function setCurrentPhraseFromSlot(trackId: string, slotIndex: number) {
     const lane = trackLanes.find((item) => item.id === trackId);
-    if (!lane) return;
+    if (!lane) return false;
     const key = lane.slots[slotIndex];
     const phrase = resolvePhraseByKey(key, currentPhrase, packList);
-    if (!phrase) return;
+    if (!phrase) return false;
     const phraseBpm = phrase.bpm ?? bpm;
-    currentPhrase = {
+    const channel = lane.category === 'perc' ? 9 : 0;
+    applyPhrase({
       ...phrase,
       id: crypto.randomUUID(),
       bpm: phraseBpm,
-      events: cloneEvents(phrase.events)
-    };
-    clip = currentPhrase.events;
-    bpm = phraseBpm;
-    newPhraseName = currentPhrase.name;
+      events: cloneEvents(phrase.events).map((ev) => ({
+        ...ev,
+        channel: ev.channel ?? channel
+      }))
+    });
     midiMetadata = null;
     midiFileName = '';
+    return true;
+  }
+
+  function editSlotInPianoRoll(trackId: string, slotIndex: number) {
+    const applied = setCurrentPhraseFromSlot(trackId, slotIndex);
+    if (applied) {
+      // Mientras se edita, la celda apunta al clip actual para que los cambios permanezcan.
+      updateTrackSlot(trackId, slotIndex, 'current');
+      playSource = 'phrase';
+      pianoRollOpen = true;
+    }
   }
 
   async function ensureFluidEngine() {
@@ -673,8 +789,10 @@
     }
   }
 
-  async function stop() {
-    stopVisualTracking();
+  async function stop(options: { keepPlayhead?: boolean } = {}) {
+    const keepPlayhead = options.keepPlayhead ?? false;
+    clearPlayStopTimer();
+    stopVisualTracking({ keepPlayhead });
     clearPreviewState();
     if (!ac) return;
     if (engineMode === 'fluid') {
@@ -699,7 +817,11 @@
     const phrase = resolvePhraseByKey(key, currentPhrase, packList);
     if (!phrase || !phrase.events.length) return;
     const phraseBpm = phrase.bpm ?? bpm;
-    const events = cloneEvents(phrase.events);
+    const channel = lane.category === 'perc' ? 9 : 0;
+    const events = cloneEvents(phrase.events).map((ev) => ({
+      ...ev,
+      channel: ev.channel ?? channel
+    }));
     const durationBeats = estimatePhraseDurationBeats(phrase);
     const durationMs = durationBeats > 0 ? (durationBeats * 60_000) / phraseBpm : 0;
 
@@ -848,14 +970,7 @@
     try {
       const phrase = await getPhrase(packId, phraseId);
       if (!phrase) return;
-      const phraseBpm = phrase.bpm ?? bpm;
-      currentPhrase = {
-        ...phrase,
-        bpm: phraseBpm,
-        events: cloneEvents(phrase.events)
-      };
-      clip = currentPhrase.events;
-      bpm = phraseBpm;
+      applyPhrase({ ...phrase });
       newPhraseName = phrase.name;
       if (isPlaying) {
         await stop();
@@ -904,15 +1019,33 @@
         file.name.replace(/\.(mid|midi)$/i, '') ||
         'Frase desde SMF';
       const events = cloneEvents(parsed.events);
-      clip = events;
-      currentPhrase = {
+      applyPhrase({
         id: crypto.randomUUID(),
         name: phraseName,
         bpm: phraseBpm,
         events
-      };
-      bpm = phraseBpm;
+      });
       newPhraseName = phraseName;
+      // Genera un pack automático de frases de 4 compases si hay material suficiente.
+      try {
+        await initPhrasePackStore();
+        const slices = slicePhraseEvents(events, phraseBpm, phraseName, SLOT_BEATS);
+        const percEvents = events.filter((ev) => (ev.channel ?? 0) === 9);
+        const percSlices =
+          percEvents.length > 0
+            ? slicePhraseEvents(percEvents, phraseBpm, `${phraseName} Perc`, SLOT_BEATS)
+            : [];
+        const allSlices = [...slices, ...percSlices];
+        if (allSlices.length > 1) {
+          const pack = await saveNewPack({
+            name: `${phraseName} (slices 4 compases)`,
+            phrases: allSlices
+          });
+          appendPackId = pack.id;
+        }
+      } catch (err) {
+        console.warn('[MIDI] No se pudo generar el pack auto', err);
+      }
       if (isPlaying) {
         await stop();
         await play();
@@ -924,6 +1057,19 @@
         (err as Error).message ?? 'No fue posible leer el archivo MIDI.';
     } finally {
       midiLoading = false;
+    }
+  }
+
+  async function handlePianoRollChange(event: CustomEvent<{ events: PhraseEvent[] }>) {
+    const nextEvents = cloneEvents(event.detail.events ?? []);
+    applyPhrase({
+      ...currentPhrase,
+      events: nextEvents
+    });
+    midiMetadata = null;
+    midiFileName = '';
+    if (isPlaying) {
+      await stop();
     }
   }
 
@@ -953,10 +1099,7 @@
         try {
           const generated = quantizedSequenceToPhrase(msg.sequence, 'Frase IA');
           const events = [...generated.events];
-          currentPhrase = { ...generated, events };
-          clip = events;
-          bpm = currentPhrase.bpm ?? bpm;
-          newPhraseName = currentPhrase.name;
+          applyPhrase({ ...generated, events });
           playSource = 'phrase';
           aiModalOpen = false;
           aiError = null;
@@ -1060,6 +1203,15 @@
     aiBusy = false;
   }
 
+  async function handleRollPlay() {
+    playSource = 'phrase';
+    await play();
+  }
+
+  async function handleRollStop() {
+    await stop();
+  }
+
   onMount(async () => {
     try {
       await initPhrasePackStore();
@@ -1143,7 +1295,16 @@
     <p style="opacity:0.65; margin:-0.5rem 0 1.5rem 0;">Carga un SoundFont para habilitar la reproducción con FluidSynth.</p>
   {/if}
 
-  <p style="opacity:0.7; margin-bottom:1.5rem;">Frase actual: {currentPhraseLabel}</p>
+  <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1.5rem; flex-wrap:wrap;">
+    <p style="opacity:0.7; margin:0;">Frase actual: {currentPhraseLabel}</p>
+    <button
+      type="button"
+      on:click={openPianoRoll}
+      style="padding:0.5rem 0.9rem; border-radius:10px; background:#1f1f1f; color:#fff; border:1px solid #333;"
+    >
+      Abrir piano roll
+    </button>
+  </div>
 
   <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;">
     <h2 style="font-size:1.2rem; margin:0 0 0.5rem 0;">IA opcional (Magenta.js)</h2>
@@ -1185,7 +1346,7 @@
   <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:1000px; margin-bottom:2rem;">
     <h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Secuenciador por pistas</h2>
     <p style="opacity:0.75; margin:0 0 0.8rem 0;">
-      Organiza hasta {SLOT_COUNT} compases (4 beats cada uno). Compases activos: {arrangementActiveBars}/{SLOT_COUNT}.
+      Organiza hasta {SLOT_COUNT} frases; cada frase dura 4 compases (16 beats). Frases activas: {arrangementActiveBars}/{SLOT_COUNT}.
     </p>
     <div style="overflow:auto;">
       <table style="width:100%; border-collapse:collapse; min-width:720px;">
@@ -1193,7 +1354,7 @@
           <tr>
             <th scope="col" style="text-align:left; padding:0.4rem 0.6rem; font-weight:600; opacity:0.8; border-bottom:1px solid #333;">Pista</th>
             {#each slotIndices as idx}
-              <th scope="col" style="text-align:center; padding:0.4rem 0.6rem; font-weight:600; opacity:0.7; border-bottom:1px solid #333;">Compás {idx + 1}</th>
+              <th scope="col" style="text-align:center; padding:0.4rem 0.6rem; font-weight:600; opacity:0.7; border-bottom:1px solid #333;">Frase {idx + 1}</th>
             {/each}
           </tr>
         </thead>
@@ -1265,7 +1426,7 @@
                         </button>
                         <button
                           type="button"
-                          on:click={() => setCurrentPhraseFromSlot(lane.id, slotIndex)}
+                          on:click={() => editSlotInPianoRoll(lane.id, slotIndex)}
                           disabled={!lane.slots[slotIndex]}
                           style="padding:0.25rem 0.6rem; border-radius:8px; background:#2c7efc; color:#fff; border:0; font-size:0.75rem;"
                         >
@@ -1511,6 +1672,41 @@
           </button>
           <span style="opacity:0.7; font-size:0.9rem;">El resultado reemplazará la frase actual.</span>
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if pianoRollOpen}
+    <div
+      style="position:fixed; inset:0; background:rgba(0,0,0,0.65); display:flex; align-items:center; justify-content:center; padding:1rem; z-index:1100;"
+    >
+      <div
+        style="background:#0f0f10; border:1px solid #333; border-radius:14px; padding:1.2rem; width: min(1180px, 100%); max-height: min(92vh, 1100px); overflow:auto; box-shadow:0 12px 40px rgba(0,0,0,0.35);"
+      >
+        <div style="display:flex; justify-content:space-between; align-items:center; gap:0.8rem; margin-bottom:0.6rem;">
+          <div>
+            <h3 style="margin:0; font-size:1.1rem;">Editar frase (piano roll)</h3>
+            <p style="margin:0; opacity:0.7; font-size:0.95rem;">{currentPhraseLabel} · {bpm} BPM</p>
+          </div>
+          <button
+            type="button"
+            on:click={closePianoRoll}
+            style="background:transparent; color:#fff; border:1px solid #444; border-radius:10px; padding:0.35rem 0.7rem;"
+          >
+            Cerrar
+          </button>
+        </div>
+        <PianoRoll
+          events={clip}
+          bpm={bpm}
+          bind:bars={rollBars}
+          playheadBeat={playheadBeat}
+          playheadTotalBeats={playheadTotalBeats}
+          isPlaying={isPlaying}
+          on:change={handlePianoRollChange}
+          on:play={handleRollPlay}
+          on:stop={handleRollStop}
+        />
       </div>
     </div>
   {/if}

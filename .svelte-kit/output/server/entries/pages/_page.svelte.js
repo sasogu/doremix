@@ -1,4 +1,4 @@
-import { V as store_get, W as attr, X as ensure_array_like, Y as attr_style, Z as unsubscribe_stores } from "../../chunks/index2.js";
+import { V as store_get, W as unsubscribe_stores, X as attr, Y as ensure_array_like, Z as attr_style } from "../../chunks/index2.js";
 import { w as writable } from "../../chunks/index.js";
 import { e as escape_html } from "../../chunks/context.js";
 const packsStore = writable([]);
@@ -221,6 +221,7 @@ function _page($$renderer, $$props) {
   $$renderer.component(($$renderer2) => {
     var $$store_subs;
     const SLOT_COUNT = 8;
+    const SLOT_BEATS = 16;
     const slotIndices = Array.from({ length: SLOT_COUNT }, (_, idx) => idx);
     const builtinOptionEntries = builtinPhrases.map((entry) => ({
       key: entry.key,
@@ -249,11 +250,35 @@ function _page($$renderer, $$props) {
       events: cloneEvents(defaultEvents)
     };
     let clip = currentPhrase.events;
+    clampRollBars(Math.ceil(estimatePhraseDurationBeats(currentPhrase) / 4));
     let trackLanes = createInitialArrangement();
     let arrangementEvents = [];
     let arrangementActiveBars = 0;
     currentPhrase.name;
     let midiLoading = false;
+    const aiModels = [
+      {
+        mode: "melody",
+        label: "Melodía (MusicVAE 16 compases)",
+        modelName: "MusicVAE mel_16bar_small_q2",
+        baseUrl: "https://storage.googleapis.com/magentadata/js/checkpoints/music_vae/mel_16bar_small_q2",
+        downloadUrl: "https://storage.googleapis.com/magentadata/js/checkpoints/music_vae/mel_16bar_small_q2/config.json",
+        modelType: "vae",
+        sizeMb: 31
+      },
+      {
+        mode: "drums",
+        label: "Batería (DrumRNN)",
+        modelName: "Drums kit RNN",
+        baseUrl: "https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/drum_kit_rnn",
+        downloadUrl: "https://storage.googleapis.com/magentadata/js/checkpoints/music_rnn/drum_kit_rnn/config.json",
+        modelType: "rnn",
+        sizeMb: 11,
+        helper: "Genera baterías de 1-2 compases."
+      }
+    ];
+    let aiMode = "melody";
+    let currentAiModel = aiModels[0];
     let packList = [];
     let packOptionEntries = [];
     let currentPhraseLabel = currentPhrase.name;
@@ -307,6 +332,10 @@ function _page($$renderer, $$props) {
     }
     function cloneEvents(events) {
       return events.map((ev) => ({ ...ev }));
+    }
+    function clampRollBars(value) {
+      if (!Number.isFinite(value)) return 4;
+      return Math.min(8, Math.max(1, Math.round(value)));
     }
     function computeActiveBars(lanes) {
       const active = /* @__PURE__ */ new Set();
@@ -365,17 +394,15 @@ function _page($$renderer, $$props) {
     }
     function computeSlotDurations(lanes, current, packs) {
       return slotIndices.map((slotIndex) => {
-        let maxDuration = 0;
         let hasPhrase = false;
         for (const lane of lanes) {
           const phrase = resolvePhraseByKey(lane.slots[slotIndex], current, packs);
-          if (!phrase) continue;
-          hasPhrase = true;
-          const duration = estimatePhraseDurationBeats(phrase);
-          if (duration > maxDuration) maxDuration = duration;
+          if (phrase) {
+            hasPhrase = true;
+            break;
+          }
         }
-        if (!hasPhrase) return 0;
-        return maxDuration;
+        return hasPhrase ? SLOT_BEATS : 0;
       });
     }
     function computeSlotOffsets(durations) {
@@ -393,6 +420,7 @@ function _page($$renderer, $$props) {
       return option.category === lane.category;
     }
     function buildArrangementEvents(lanes, current, packs, offsets) {
+      const channelForLane = (lane) => lane.category === "perc" ? 9 : 0;
       const events = [];
       lanes.forEach((lane) => {
         lane.slots.forEach((key, slotIndex) => {
@@ -404,7 +432,8 @@ function _page($$renderer, $$props) {
               type: ev.type,
               note: ev.note,
               velocity: ev.velocity,
-              beat: ev.beat + offset
+              beat: ev.beat + offset,
+              channel: ev.channel ?? channelForLane(lane)
             });
           });
         });
@@ -435,133 +464,175 @@ function _page($$renderer, $$props) {
     arrangementActiveBars = computeActiveBars(trackLanes);
     hasEvents = arrangementEvents.length > 0;
     isPlayDisabled = !hasEvents || engineMode === "fluid";
-    $$renderer2.push(`<main class="p-6 min-h-screen" style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; background:#0b0b0b; color:#f2f2f2;"><h1 style="font-size:2rem; font-weight:700; margin-bottom:1rem;">DoReMix — PWA (SvelteKit)</h1> <p style="opacity:0.8; margin-bottom:1.5rem;">Demo: reproduce un pequeño "clip" de 1 compás con un sintetizador en AudioWorklet.</p> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Motor de sonido</h2> <div style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center; margin-bottom:0.8rem;"><label for="engine-mode" style="min-width:8rem;">Modo</label> `);
-    $$renderer2.select(
+    currentAiModel = aiModels.find((item) => item.mode === aiMode) ?? aiModels[0];
+    let $$settled = true;
+    let $$inner_renderer;
+    function $$render_inner($$renderer3) {
+      $$renderer3.push(`<main class="p-6 min-h-screen" style="font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, sans-serif; background:#0b0b0b; color:#f2f2f2;"><h1 style="font-size:2rem; font-weight:700; margin-bottom:1rem;">DoReMix — PWA (SvelteKit)</h1> <p style="opacity:0.8; margin-bottom:1.5rem;">Demo: reproduce un pequeño "clip" de 1 compás con un sintetizador en AudioWorklet.</p> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Motor de sonido</h2> <div style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center; margin-bottom:0.8rem;"><label for="engine-mode" style="min-width:8rem;">Modo</label> `);
+      $$renderer3.select(
+        {
+          id: "engine-mode",
+          value: engineMode,
+          style: "flex:0 1 240px; min-width:200px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+        },
+        ($$renderer4) => {
+          $$renderer4.option({ value: "basic" }, ($$renderer5) => {
+            $$renderer5.push(`Motor interno (seno simple)`);
+          });
+          $$renderer4.option({ value: "fluid" }, ($$renderer5) => {
+            $$renderer5.push(`FluidSynth + SoundFont GM`);
+          });
+        }
+      );
+      $$renderer3.push(` `);
       {
-        id: "engine-mode",
-        value: (
-          // pequeño margen para dejar respirar el loop
-          engineMode
-        ),
-        style: "flex:0 1 240px; min-width:200px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
-      },
-      ($$renderer3) => {
-        $$renderer3.option({ value: "basic" }, ($$renderer4) => {
-          $$renderer4.push(`Motor interno (seno simple)`);
-        });
-        $$renderer3.option({ value: "fluid" }, ($$renderer4) => {
-          $$renderer4.push(`FluidSynth + SoundFont GM`);
-        });
+        $$renderer3.push("<!--[!-->");
       }
-    );
-    $$renderer2.push(` `);
-    {
-      $$renderer2.push("<!--[!-->");
-    }
-    $$renderer2.push(`<!--]--></div> `);
-    {
-      $$renderer2.push("<!--[!-->");
-    }
-    $$renderer2.push(`<!--]--></section> <div style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;"><label for="bpm-input">BPM</label> <input id="bpm-input" type="number"${attr("value", bpm)} min="40" max="240" style="width:5rem; padding:0.4rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"/> <label for="play-source">Reproducir</label> `);
-    $$renderer2.select(
+      $$renderer3.push(`<!--]--></div> `);
       {
-        id: "play-source",
-        value: playSource,
-        style: "flex:0 1 220px; min-width:180px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
-      },
-      ($$renderer3) => {
-        $$renderer3.option({ value: "arrangement" }, ($$renderer4) => {
-          $$renderer4.push(`Secuencia (todas las pistas)`);
-        });
-        $$renderer3.option({ value: "phrase" }, ($$renderer4) => {
-          $$renderer4.push(`Solo frase actual`);
-        });
+        $$renderer3.push("<!--[!-->");
       }
-    );
-    $$renderer2.push(` <button${attr("disabled", isPlayDisabled, true)} style="padding:0.6rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;">Play</button> <button${attr("disabled", !isPlaying, true)} style="padding:0.6rem 1rem; border-radius:10px; background:#444; color:#fff; border:0;">Stop</button></div> `);
-    {
-      $$renderer2.push("<!--[!-->");
-    }
-    $$renderer2.push(`<!--]--> <p style="opacity:0.7; margin-bottom:1.5rem;">Frase actual: ${escape_html(currentPhraseLabel)}</p> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:1000px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Secuenciador por pistas</h2> <p style="opacity:0.75; margin:0 0 0.8rem 0;">Organiza hasta 8 compases (4 beats cada uno). Compases activos: ${escape_html(arrangementActiveBars)}/8.</p> <div style="overflow:auto;"><table style="width:100%; border-collapse:collapse; min-width:720px;"><thead><tr><th scope="col" style="text-align:left; padding:0.4rem 0.6rem; font-weight:600; opacity:0.8; border-bottom:1px solid #333;">Pista</th><!--[-->`);
-    const each_array = ensure_array_like(slotIndices);
-    for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
-      let idx = each_array[$$index];
-      $$renderer2.push(`<th scope="col" style="text-align:center; padding:0.4rem 0.6rem; font-weight:600; opacity:0.7; border-bottom:1px solid #333;">Compás ${escape_html(idx + 1)}</th>`);
-    }
-    $$renderer2.push(`<!--]--></tr></thead><tbody><!--[-->`);
-    const each_array_1 = ensure_array_like(trackLanes);
-    for (let $$index_4 = 0, $$length = each_array_1.length; $$index_4 < $$length; $$index_4++) {
-      let lane = each_array_1[$$index_4];
-      $$renderer2.push(`<tr><th scope="row" style="padding:0.6rem; text-align:left; border-bottom:1px solid #222;"><div style="display:flex; align-items:center; gap:0.6rem;"><span aria-hidden="true"${attr_style(`display:inline-block; width:0.9rem; height:0.9rem; border-radius:999px; background:${lane.color};`)}></span> <span>${escape_html(lane.name)}</span> <button type="button" style="margin-left:auto; padding:0.25rem 0.6rem; border-radius:999px; font-size:0.75rem; background:#1f1f1f; color:#ddd; border:1px solid #333;">Vaciar pista</button></div></th><!--[-->`);
-      const each_array_2 = ensure_array_like(slotIndices);
-      for (let $$index_3 = 0, $$length2 = each_array_2.length; $$index_3 < $$length2; $$index_3++) {
-        let slotIndex = each_array_2[$$index_3];
-        $$renderer2.push(`<td${attr_style(`padding:0.6rem; border-bottom:1px solid #222; background:${activeSlotIndex === slotIndex ? "rgba(44,126,252,0.2)" : previewLaneId === lane.id && previewSlotIndex === slotIndex ? "rgba(34,211,238,0.18)" : "transparent"}; transition:background 0.2s ease;`)}><div style="display:flex; flex-direction:column; gap:0.35rem;">`);
-        $$renderer2.select(
-          {
-            value: lane.slots[slotIndex] ?? "",
-            style: "padding:0.35rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
-          },
-          ($$renderer3) => {
-            $$renderer3.option({ value: "" }, ($$renderer4) => {
-              $$renderer4.push(`— Vacío —`);
+      $$renderer3.push(`<!--]--></section> <div style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;"><label for="bpm-input">BPM</label> <input id="bpm-input" type="number"${attr("value", bpm)} min="40" max="240" style="width:5rem; padding:0.4rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"/> <label for="play-source">Reproducir</label> `);
+      $$renderer3.select(
+        {
+          id: "play-source",
+          value: playSource,
+          style: "flex:0 1 220px; min-width:180px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+        },
+        ($$renderer4) => {
+          $$renderer4.option({ value: "arrangement" }, ($$renderer5) => {
+            $$renderer5.push(`Secuencia (todas las pistas)`);
+          });
+          $$renderer4.option({ value: "phrase" }, ($$renderer5) => {
+            $$renderer5.push(`Solo frase actual`);
+          });
+        }
+      );
+      $$renderer3.push(` <button${attr("disabled", isPlayDisabled, true)} style="padding:0.6rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;">Play</button> <button${attr("disabled", !isPlaying, true)} style="padding:0.6rem 1rem; border-radius:10px; background:#444; color:#fff; border:0;">Stop</button></div> `);
+      {
+        $$renderer3.push("<!--[!-->");
+      }
+      $$renderer3.push(`<!--]--> <div style="display:flex; align-items:center; gap:1rem; margin-bottom:1.5rem; flex-wrap:wrap;"><p style="opacity:0.7; margin:0;">Frase actual: ${escape_html(currentPhraseLabel)}</p> <button type="button" style="padding:0.5rem 0.9rem; border-radius:10px; background:#1f1f1f; color:#fff; border:1px solid #333;">Abrir piano roll</button></div> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.5rem 0;">IA opcional (Magenta.js)</h2> <p style="opacity:0.75; margin:0 0 0.8rem 0;">Descarga bajo demanda y se cachea automáticamente tras el primer uso. Pensado para tablets: muestra barra de progreso y no afecta al resto de la app.</p> <div style="display:flex; gap:0.6rem; flex-wrap:wrap; align-items:center;"><label for="ai-mode" style="opacity:0.8;">Modo</label> `);
+      $$renderer3.select(
+        {
+          id: "ai-mode",
+          value: aiMode,
+          style: "padding:0.45rem 0.6rem; min-width:220px; background:#181818; color:#fff; border:1px solid #333; border-radius:10px;"
+        },
+        ($$renderer4) => {
+          $$renderer4.push(`<!--[-->`);
+          const each_array = ensure_array_like(aiModels);
+          for (let $$index = 0, $$length = each_array.length; $$index < $$length; $$index++) {
+            let option = each_array[$$index];
+            $$renderer4.option({ value: option.mode, disabled: option.disabled }, ($$renderer5) => {
+              $$renderer5.push(`${escape_html(option.label)}`);
             });
-            $$renderer3.push(`<optgroup label="Frase actual">`);
-            $$renderer3.option({ value: "current" }, ($$renderer4) => {
-              $$renderer4.push(`${escape_html(currentOptionLabel)}`);
-            });
-            $$renderer3.push(`</optgroup>`);
-            if (packOptionEntries.length) {
-              $$renderer3.push("<!--[-->");
-              $$renderer3.push(`<optgroup label="Packs guardados"><!--[-->`);
-              const each_array_3 = ensure_array_like(packOptionEntries.filter((option) => optionAllowedForLane(option, lane)));
-              for (let $$index_1 = 0, $$length3 = each_array_3.length; $$index_1 < $$length3; $$index_1++) {
-                let option = each_array_3[$$index_1];
-                $$renderer3.option({ value: option.key }, ($$renderer4) => {
-                  $$renderer4.push(`${escape_html(option.label)}`);
+          }
+          $$renderer4.push(`<!--]-->`);
+        }
+      );
+      $$renderer3.push(` <span style="opacity:0.75; font-size:0.9rem;">Modelo: ${escape_html(currentAiModel.modelName)} (~${escape_html(currentAiModel.sizeMb)} MB)</span> <button type="button" style="padding:0.6rem 1rem; border-radius:10px; background:#8b5cf6; color:#fff; border:0;">Abrir panel IA</button> <span style="opacity:0.7; font-size:0.9rem;">Estado: ${escape_html("Pendiente de descarga")}</span></div> `);
+      if (currentAiModel.helper) {
+        $$renderer3.push("<!--[-->");
+        $$renderer3.push(`<p style="opacity:0.6; margin:0.4rem 0 0 0;">${escape_html(currentAiModel.helper)}</p>`);
+      } else {
+        $$renderer3.push("<!--[!-->");
+      }
+      $$renderer3.push(`<!--]--></section> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:1000px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Secuenciador por pistas</h2> <p style="opacity:0.75; margin:0 0 0.8rem 0;">Organiza hasta 8 frases; cada frase dura 4 compases (16 beats). Frases activas: ${escape_html(arrangementActiveBars)}/8.</p> <div style="overflow:auto;"><table style="width:100%; border-collapse:collapse; min-width:720px;"><thead><tr><th scope="col" style="text-align:left; padding:0.4rem 0.6rem; font-weight:600; opacity:0.8; border-bottom:1px solid #333;">Pista</th><!--[-->`);
+      const each_array_1 = ensure_array_like(slotIndices);
+      for (let $$index_1 = 0, $$length = each_array_1.length; $$index_1 < $$length; $$index_1++) {
+        let idx = each_array_1[$$index_1];
+        $$renderer3.push(`<th scope="col" style="text-align:center; padding:0.4rem 0.6rem; font-weight:600; opacity:0.7; border-bottom:1px solid #333;">Frase ${escape_html(idx + 1)}</th>`);
+      }
+      $$renderer3.push(`<!--]--></tr></thead><tbody><!--[-->`);
+      const each_array_2 = ensure_array_like(trackLanes);
+      for (let $$index_5 = 0, $$length = each_array_2.length; $$index_5 < $$length; $$index_5++) {
+        let lane = each_array_2[$$index_5];
+        $$renderer3.push(`<tr><th scope="row" style="padding:0.6rem; text-align:left; border-bottom:1px solid #222;"><div style="display:flex; align-items:center; gap:0.6rem;"><span aria-hidden="true"${attr_style(`display:inline-block; width:0.9rem; height:0.9rem; border-radius:999px; background:${lane.color};`)}></span> <span>${escape_html(lane.name)}</span> <button type="button" style="margin-left:auto; padding:0.25rem 0.6rem; border-radius:999px; font-size:0.75rem; background:#1f1f1f; color:#ddd; border:1px solid #333;">Vaciar pista</button></div></th><!--[-->`);
+        const each_array_3 = ensure_array_like(slotIndices);
+        for (let $$index_4 = 0, $$length2 = each_array_3.length; $$index_4 < $$length2; $$index_4++) {
+          let slotIndex = each_array_3[$$index_4];
+          $$renderer3.push(`<td${attr_style(`padding:0.6rem; border-bottom:1px solid #222; background:${activeSlotIndex === slotIndex ? "rgba(44,126,252,0.2)" : previewLaneId === lane.id && previewSlotIndex === slotIndex ? "rgba(34,211,238,0.18)" : "transparent"}; transition:background 0.2s ease;`)}><div style="display:flex; flex-direction:column; gap:0.35rem;">`);
+          $$renderer3.select(
+            {
+              value: lane.slots[slotIndex] ?? "",
+              style: "padding:0.35rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+            },
+            ($$renderer4) => {
+              $$renderer4.option({ value: "" }, ($$renderer5) => {
+                $$renderer5.push(`— Vacío —`);
+              });
+              $$renderer4.push(`<optgroup label="Frase actual">`);
+              $$renderer4.option({ value: "current" }, ($$renderer5) => {
+                $$renderer5.push(`${escape_html(currentOptionLabel)}`);
+              });
+              $$renderer4.push(`</optgroup>`);
+              if (packOptionEntries.length) {
+                $$renderer4.push("<!--[-->");
+                $$renderer4.push(`<optgroup label="Packs guardados"><!--[-->`);
+                const each_array_4 = ensure_array_like(packOptionEntries.filter((option) => optionAllowedForLane(option, lane)));
+                for (let $$index_2 = 0, $$length3 = each_array_4.length; $$index_2 < $$length3; $$index_2++) {
+                  let option = each_array_4[$$index_2];
+                  $$renderer4.option({ value: option.key }, ($$renderer5) => {
+                    $$renderer5.push(`${escape_html(option.label)}`);
+                  });
+                }
+                $$renderer4.push(`<!--]--></optgroup>`);
+              } else {
+                $$renderer4.push("<!--[!-->");
+              }
+              $$renderer4.push(`<!--]--><optgroup label="Frases base"><!--[-->`);
+              const each_array_5 = ensure_array_like(builtinOptionEntries.filter((option) => optionAllowedForLane(option, lane)));
+              for (let $$index_3 = 0, $$length3 = each_array_5.length; $$index_3 < $$length3; $$index_3++) {
+                let option = each_array_5[$$index_3];
+                $$renderer4.option({ value: `builtin:${option.key}` }, ($$renderer5) => {
+                  $$renderer5.push(`${escape_html(option.label)}`);
                 });
               }
-              $$renderer3.push(`<!--]--></optgroup>`);
-            } else {
-              $$renderer3.push("<!--[!-->");
+              $$renderer4.push(`<!--]--></optgroup>`);
             }
-            $$renderer3.push(`<!--]--><optgroup label="Frases base"><!--[-->`);
-            const each_array_4 = ensure_array_like(builtinOptionEntries.filter((option) => optionAllowedForLane(option, lane)));
-            for (let $$index_2 = 0, $$length3 = each_array_4.length; $$index_2 < $$length3; $$index_2++) {
-              let option = each_array_4[$$index_2];
-              $$renderer3.option({ value: `builtin:${option.key}` }, ($$renderer4) => {
-                $$renderer4.push(`${escape_html(option.label)}`);
-              });
-            }
-            $$renderer3.push(`<!--]--></optgroup>`);
-          }
-        );
-        $$renderer2.push(` <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem;"><span style="opacity:0.6; font-size:0.75rem;">${escape_html(getPhraseLabel(lane.slots[slotIndex], currentPhraseLabel, packList))}</span> <div style="display:flex; gap:0.35rem; align-items:center;"><button type="button"${attr("disabled", !lane.slots[slotIndex] || isPlaying, true)} title="Previsualizar esta frase" style="padding:0.25rem 0.5rem; border-radius:8px; background:#1e1e1e; color:#fff; border:1px solid #333; font-size:0.75rem;">▶</button> <button type="button"${attr("disabled", !lane.slots[slotIndex], true)} style="padding:0.25rem 0.6rem; border-radius:8px; background:#2c7efc; color:#fff; border:0; font-size:0.75rem;">Editar</button></div></div></div></td>`);
+          );
+          $$renderer3.push(` <div style="display:flex; justify-content:space-between; align-items:center; gap:0.5rem;"><span style="opacity:0.6; font-size:0.75rem;">${escape_html(getPhraseLabel(lane.slots[slotIndex], currentPhraseLabel, packList))}</span> <div style="display:flex; gap:0.35rem; align-items:center;"><button type="button"${attr("disabled", !lane.slots[slotIndex] || isPlaying, true)} title="Previsualizar esta frase" style="padding:0.25rem 0.5rem; border-radius:8px; background:#1e1e1e; color:#fff; border:1px solid #333; font-size:0.75rem;">▶</button> <button type="button"${attr("disabled", !lane.slots[slotIndex], true)} style="padding:0.25rem 0.6rem; border-radius:8px; background:#2c7efc; color:#fff; border:0; font-size:0.75rem;">Editar</button></div></div></div></td>`);
+        }
+        $$renderer3.push(`<!--]--></tr>`);
       }
-      $$renderer2.push(`<!--]--></tr>`);
-    }
-    $$renderer2.push(`<!--]--></tbody></table></div></section> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Importar SMF (.mid)</h2> <p style="opacity:0.75; margin-bottom:0.8rem;">Carga un archivo MIDI estándar para convertirlo en la frase activa.</p> <div style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center; margin-bottom:0.8rem;"><label for="smf-file" style="min-width:8rem;">Archivo SMF</label> <input id="smf-file" type="file" accept=".mid,.midi"${attr("disabled", midiLoading, true)} style="flex:1 1 240px; min-width:220px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"/> `);
-    {
-      $$renderer2.push("<!--[!-->");
+      $$renderer3.push(`<!--]--></tbody></table></div></section> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Importar SMF (.mid)</h2> <p style="opacity:0.75; margin-bottom:0.8rem;">Carga un archivo MIDI estándar para convertirlo en la frase activa.</p> <div style="display:flex; flex-wrap:wrap; gap:0.8rem; align-items:center; margin-bottom:0.8rem;"><label for="smf-file" style="min-width:8rem;">Archivo SMF</label> <input id="smf-file" type="file" accept=".mid,.midi"${attr("disabled", midiLoading, true)} style="flex:1 1 240px; min-width:220px; padding:0.45rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"/> `);
       {
-        $$renderer2.push("<!--[!-->");
+        $$renderer3.push("<!--[!-->");
+        {
+          $$renderer3.push("<!--[!-->");
+        }
+        $$renderer3.push(`<!--]-->`);
       }
-      $$renderer2.push(`<!--]-->`);
+      $$renderer3.push(`<!--]--></div> `);
+      {
+        $$renderer3.push("<!--[!-->");
+      }
+      $$renderer3.push(`<!--]--> `);
+      {
+        $$renderer3.push("<!--[!-->");
+      }
+      $$renderer3.push(`<!--]--></section> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Packs de frases (IndexedDB / OPFS)</h2> `);
+      {
+        $$renderer3.push("<!--[-->");
+        $$renderer3.push(`<p style="opacity:0.7;">Inicializando almacenamiento local…</p>`);
+      }
+      $$renderer3.push(`<!--]--></section> <div style="border:1px solid #333; border-radius:12px; padding:1rem; max-width:720px;"><h2 style="font-size:1.2rem; margin:0 0 0.5rem 0;">Qué incluye este esqueleto</h2> <ul style="line-height:1.6;"><li>AudioWorklet con sintetizador simple (seno) y <em>scheduler</em> básico</li> <li>VitePWA: manifest &amp; service worker (instalable/offline)</li> <li>Página de prueba + controles</li></ul></div> `);
+      {
+        $$renderer3.push("<!--[!-->");
+      }
+      $$renderer3.push(`<!--]--> `);
+      {
+        $$renderer3.push("<!--[!-->");
+      }
+      $$renderer3.push(`<!--]--></main>`);
     }
-    $$renderer2.push(`<!--]--></div> `);
-    {
-      $$renderer2.push("<!--[!-->");
-    }
-    $$renderer2.push(`<!--]--> `);
-    {
-      $$renderer2.push("<!--[!-->");
-    }
-    $$renderer2.push(`<!--]--></section> <section style="border:1px solid #333; border-radius:12px; padding:1.2rem; max-width:820px; margin-bottom:2rem;"><h2 style="font-size:1.2rem; margin:0 0 0.8rem 0;">Packs de frases (IndexedDB / OPFS)</h2> `);
-    {
-      $$renderer2.push("<!--[-->");
-      $$renderer2.push(`<p style="opacity:0.7;">Inicializando almacenamiento local…</p>`);
-    }
-    $$renderer2.push(`<!--]--></section> <div style="border:1px solid #333; border-radius:12px; padding:1rem; max-width:720px;"><h2 style="font-size:1.2rem; margin:0 0 0.5rem 0;">Qué incluye este esqueleto</h2> <ul style="line-height:1.6;"><li>AudioWorklet con sintetizador simple (seno) y <em>scheduler</em> básico</li> <li>VitePWA: manifest &amp; service worker (instalable/offline)</li> <li>Página de prueba + controles</li></ul></div></main>`);
+    do {
+      $$settled = true;
+      $$inner_renderer = $$renderer2.copy();
+      $$render_inner($$inner_renderer);
+    } while (!$$settled);
+    $$renderer2.subsume($$inner_renderer);
     if ($$store_subs) unsubscribe_stores($$store_subs);
   });
 }
