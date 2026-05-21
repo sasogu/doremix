@@ -1263,418 +1263,390 @@
         'No fue posible inicializar el almacenamiento local.';
     }
   });
+
+  // ── Secciones plegables / reordenables ──
+  type SectionId = 'motor' | 'transport' | 'ai' | 'sequencer' | 'smf' | 'packs' | 'info';
+
+  const sectionLabel: Record<SectionId, string> = {
+    motor:     'Motor de sonido',
+    transport: 'Transporte',
+    ai:        'IA opcional (Magenta.js)',
+    sequencer: 'Secuenciador por pistas',
+    smf:       'Importar SMF (.mid)',
+    packs:     'Packs de frases',
+    info:      'Qué incluye este esqueleto',
+  };
+
+  let sectionOrder: SectionId[] = ['motor', 'transport', 'ai', 'sequencer', 'smf', 'packs', 'info'];
+  let collapsed: Record<SectionId, boolean> = {
+    motor: false, transport: false, ai: false,
+    sequencer: false, smf: false, packs: false, info: true,
+  };
+
+  function moveSection(id: SectionId, dir: -1 | 1) {
+    const i = sectionOrder.indexOf(id);
+    const j = i + dir;
+    if (j < 0 || j >= sectionOrder.length) return;
+    const copy = [...sectionOrder];
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+    sectionOrder = copy;
+  }
+
+  function toggleSection(id: SectionId) {
+    collapsed = { ...collapsed, [id]: !collapsed[id] };
+  }
 </script>
 
 <main class="min-h-screen bg-base-100 text-base-content">
   <div class="max-w-5xl mx-auto px-4 py-8">
 
-    <!-- Header -->
     <header class="mb-8">
       <h1 class="text-4xl font-bold tracking-tight mb-1">DoReMix</h1>
       <p class="text-base-content/50 text-sm">PWA · SvelteKit · AudioWorklet</p>
     </header>
 
-    <!-- Motor de sonido -->
-    <section class="card bg-base-200 shadow mb-4">
-      <div class="card-body p-5 gap-3">
-        <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40">Motor de sonido</h2>
-        <div class="flex flex-wrap gap-3 items-center">
-          <label class="label-text w-20 shrink-0" for="engine-mode">Modo</label>
-          <select
-            id="engine-mode"
-            value={engineMode}
-            on:change={handleEngineModeChange}
-            class="select select-bordered select-sm bg-base-300 min-w-[200px]"
+    {#each sectionOrder as sectionId, idx}
+      <div class="card bg-base-200 shadow mb-3">
+        <div class="card-body p-4 gap-3">
+
+          <!-- Cabecera común: título + plegar + subir/bajar -->
+          <!-- svelte-ignore a11y-no-static-element-interactions -->
+          <div
+            class="flex items-center gap-2 cursor-pointer select-none group"
+            on:click={() => toggleSection(sectionId)}
+            on:keydown={(e) => e.key === 'Enter' && toggleSection(sectionId)}
           >
-            <option value="basic">Motor interno (seno simple)</option>
-            <option value="fluid">FluidSynth + SoundFont GM</option>
-          </select>
-          {#if engineMode === 'fluid'}
-            <span class="text-base-content/50 text-sm">{currentSoundFontLabel}</span>
-          {/if}
-        </div>
-        {#if engineMode === 'fluid'}
-          {#if fluidError}
-            <p class="text-error text-sm">{fluidError}</p>
-          {/if}
-          <div class="flex flex-wrap gap-3 items-center">
-            <label class="label-text min-w-[12rem] shrink-0" for="soundfont-file">Cargar SoundFont (.sf2/.sf3)</label>
-            <input
-              id="soundfont-file"
-              type="file"
-              accept=".sf2,.sf3"
-              on:change={handleSoundFontSelect}
-              disabled={soundFontLoading}
-              class="file-input file-input-bordered file-input-sm bg-base-300 flex-1 min-w-[200px]"
-            />
-            <button
-              type="button"
-              on:click={handleLoadDefaultSoundFont}
-              disabled={soundFontLoading}
-              class="btn btn-sm btn-neutral"
-            >
-              {soundFontLoading ? 'Cargando…' : 'Usar /fluidsynth/GeneralUser-GS.sf2'}
-            </button>
+            <span class="text-base-content/30 text-[10px] w-3 shrink-0 transition-transform duration-150"
+              class:rotate-[-90deg]={collapsed[sectionId]}>▼</span>
+            <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40 flex-1
+              group-hover:text-base-content/60 transition-colors">
+              {sectionLabel[sectionId]}
+            </h2>
+            <!-- svelte-ignore a11y-no-static-element-interactions -->
+            <div class="flex gap-0.5" on:click|stopPropagation>
+              <button type="button"
+                class="btn btn-ghost btn-xs px-1.5 text-base-content/20 hover:text-base-content disabled:opacity-10"
+                on:click={() => moveSection(sectionId, -1)}
+                disabled={idx === 0}
+                title="Subir módulo">↑</button>
+              <button type="button"
+                class="btn btn-ghost btn-xs px-1.5 text-base-content/20 hover:text-base-content disabled:opacity-10"
+                on:click={() => moveSection(sectionId, 1)}
+                disabled={idx === sectionOrder.length - 1}
+                title="Bajar módulo">↓</button>
+            </div>
           </div>
-          <p class="text-base-content/40 text-xs">
-            Coloca <code class="bg-base-300 px-1 rounded font-mono">libfluidsynth-*.js</code>,
-            <code class="bg-base-300 px-1 rounded font-mono">libfluidsynth-*.wasm</code> y un SoundFont GM en
-            <code class="bg-base-300 px-1 rounded font-mono">static/fluidsynth/</code>, o carga uno manualmente.
-          </p>
-        {/if}
-      </div>
-    </section>
 
-    <!-- Transport -->
-    <div class="card bg-base-200 shadow mb-4">
-      <div class="card-body p-4 gap-3">
-        <div class="flex flex-wrap gap-4 items-center">
-          <div class="flex items-center gap-2">
-            <label class="label-text text-sm" for="bpm-input">BPM</label>
-            <input id="bpm-input" type="number" bind:value={bpm} min="40" max="240"
-              class="input input-bordered input-sm bg-base-300 w-20 text-center" />
-          </div>
-          <div class="flex items-center gap-2">
-            <label class="label-text text-sm" for="transpose-input"
-              title="Semitonos de transposición (±24). La percusión no se transpone.">Transpose</label>
-            <input id="transpose-input" type="number" bind:value={semitoneOffset} min="-24" max="24"
-              class="input input-bordered input-sm bg-base-300 w-20 text-center"
-              title="Semitonos de transposición (±24). La percusión no se transpone." />
-            <span class="badge badge-ghost badge-sm font-mono">
-              {semitoneOffset > 0 ? `+${semitoneOffset}` : semitoneOffset} st
-            </span>
-          </div>
-          <div class="flex items-center gap-2">
-            <label class="label-text text-sm" for="play-source">Fuente</label>
-            <select
-              id="play-source"
-              value={playSource}
-              on:change={handlePlaySourceChange}
-              class="select select-bordered select-sm bg-base-300 min-w-[200px]"
-            >
-              <option value="arrangement">Secuencia (todas las pistas)</option>
-              <option value="phrase">Solo frase actual</option>
-            </select>
-          </div>
-        </div>
-        <div class="flex flex-wrap gap-2 items-center">
-          <button on:click={play} disabled={isPlaying || isPlayDisabled} class="btn btn-primary btn-sm">
-            ▶ Play
-          </button>
-          <button on:click={stop} disabled={!isPlaying} class="btn btn-neutral btn-sm">
-            ■ Stop
-          </button>
-          <button
-            type="button"
-            on:click={() => (loopMode = !loopMode)}
-            title="Repetir en bucle"
-            class={loopMode ? 'btn btn-info btn-sm' : 'btn btn-ghost btn-sm border border-base-300'}
-          >
-            ↺ Loop {loopMode ? 'ON' : 'OFF'}
-          </button>
-          <button
-            type="button"
-            on:click={handleExportSMF}
-            disabled={!hasEvents}
-            title="Exportar como archivo MIDI (.mid)"
-            class="btn btn-ghost btn-sm border border-base-300"
-          >
-            ↓ Exportar MIDI
-          </button>
-        </div>
-        {#if engineMode === 'fluid' && !fluidStatus.soundFontLoaded}
-          <p class="text-base-content/40 text-xs -mt-1">Carga un SoundFont para habilitar la reproducción con FluidSynth.</p>
-        {/if}
-      </div>
-    </div>
+          <!-- Contenido de cada sección -->
+          {#if !collapsed[sectionId]}
 
-    <!-- Frase actual -->
-    <div class="flex items-center gap-3 mb-4">
-      <span class="text-base-content/50 text-sm">
-        Frase actual: <span class="text-base-content font-medium">{currentPhraseLabel}</span>
-      </span>
-      <button type="button" on:click={openPianoRoll} class="btn btn-ghost btn-xs border border-base-300">
-        Abrir piano roll
-      </button>
-    </div>
-
-    <!-- IA opcional -->
-    <section class="card bg-base-200 shadow mb-4">
-      <div class="card-body p-5 gap-3">
-        <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40">IA opcional (Magenta.js)</h2>
-        <p class="text-base-content/50 text-sm">
-          Descarga bajo demanda y se cachea automáticamente tras el primer uso. Pensado para tablets: muestra barra de progreso y no afecta al resto de la app.
-        </p>
-        <div class="flex flex-wrap gap-3 items-center">
-          <label class="label-text text-sm" for="ai-mode">Modo</label>
-          <select id="ai-mode" bind:value={aiMode} class="select select-bordered select-sm bg-base-300 min-w-[220px]">
-            {#each aiModels as option}
-              <option value={option.mode} disabled={option.disabled}>{option.label}</option>
-            {/each}
-          </select>
-          <span class="text-base-content/40 text-xs">Modelo: {currentAiModel.modelName} (~{currentAiModel.sizeMb} MB)</span>
-          <button type="button" on:click={openAiModal} class="btn btn-secondary btn-sm">
-            Abrir panel IA
-          </button>
-          <div class={`badge badge-sm ${
-            aiProgressStage === 'ready' ? 'badge-success' :
-            aiProgressStage === 'downloading' ? 'badge-warning' : 'badge-ghost'
-          }`}>
-            {aiProgressStage === 'downloading' ? 'Descargando…' : aiProgressStage === 'ready' ? 'Listo' : 'Pendiente'}
-          </div>
-        </div>
-        {#if currentAiModel.helper}
-          <p class="text-base-content/30 text-xs">{currentAiModel.helper}</p>
-        {/if}
-      </div>
-    </section>
-
-    <!-- Secuenciador por pistas -->
-    <section class="card bg-base-200 shadow mb-4">
-      <div class="card-body p-5 gap-3">
-        <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40">Secuenciador por pistas</h2>
-        <p class="text-base-content/40 text-xs">
-          Organiza hasta {SLOT_COUNT} frases; cada frase dura 4 compases (16 beats). Frases activas: {arrangementActiveBars}/{SLOT_COUNT}.
-        </p>
-        <div class="overflow-x-auto">
-          <table class="table table-xs w-full min-w-[720px]">
-            <thead>
-              <tr>
-                <th class="text-base-content/50 font-semibold">Pista</th>
-                {#each slotIndices as idx}
-                  <th class="text-center text-base-content/40 font-medium">Frase {idx + 1}</th>
-                {/each}
-              </tr>
-            </thead>
-            <tbody>
-              {#each trackLanes as lane}
-                <tr>
-                  <th class="align-top w-36">
-                    <div class="flex items-center gap-2">
-                      <span aria-hidden="true" class="w-2.5 h-2.5 rounded-full shrink-0" style="background:{lane.color}"></span>
-                      <span class="font-medium text-sm">{lane.name}</span>
-                      <button
-                        type="button"
-                        on:click={() => clearTrack(lane.id)}
-                        class="btn btn-ghost btn-xs ml-auto text-base-content/40 hover:text-base-content"
-                      >×</button>
-                    </div>
-                  </th>
-                  {#each slotIndices as slotIndex}
-                    <td class={`align-top transition-colors duration-200 ${
-                      playSource === 'arrangement' && activeSlotIndex === slotIndex
-                        ? 'bg-primary/20'
-                        : previewLaneId === lane.id && previewSlotIndex === slotIndex
-                        ? 'bg-info/15'
-                        : ''
-                    }`}>
-                      <div class="flex flex-col gap-1">
-                        <select
-                          value={lane.slots[slotIndex] ?? ''}
-                          on:change={(event) =>
-                            updateTrackSlot(
-                              lane.id,
-                              slotIndex,
-                              (event.currentTarget as HTMLSelectElement).value || null
-                            )}
-                          class="select select-bordered select-xs bg-base-300 w-full"
-                        >
-                          <option value="">— Vacío —</option>
-                          <optgroup label="Frase actual">
-                            <option value="current">{currentOptionLabel}</option>
-                          </optgroup>
-                          {#if packOptionEntries.length}
-                            <optgroup label="Packs guardados">
-                              {#each packOptionEntries.filter((option) => optionAllowedForLane(option, lane)) as option}
-                                <option value={option.key}>{option.label}</option>
-                              {/each}
-                            </optgroup>
-                          {/if}
-                          <optgroup label="Frases base">
-                            {#each builtinOptionEntries.filter((option) => optionAllowedForLane(option, lane)) as option}
-                              <option value={`builtin:${option.key}`}>{option.label}</option>
-                            {/each}
-                          </optgroup>
-                        </select>
-                        <div class="flex justify-between items-center gap-1">
-                          <span class="text-base-content/30 text-xs truncate max-w-[80px]">
-                            {getPhraseLabel(lane.slots[slotIndex], currentPhraseLabel, packList)}
-                          </span>
-                          <div class="flex gap-1">
-                            <button
-                              type="button"
-                              on:click={() => previewTrackSlot(lane.id, slotIndex)}
-                              disabled={!lane.slots[slotIndex] || isPlaying}
-                              title="Previsualizar"
-                              class="btn btn-ghost btn-xs">▶</button>
-                            <button
-                              type="button"
-                              on:click={() => editSlotInPianoRoll(lane.id, slotIndex)}
-                              disabled={!lane.slots[slotIndex]}
-                              class="btn btn-primary btn-xs">Editar</button>
-                          </div>
-                        </div>
-                      </div>
-                    </td>
-                  {/each}
-                </tr>
-              {/each}
-            </tbody>
-          </table>
-        </div>
-      </div>
-    </section>
-
-    <!-- Importar SMF -->
-    <section class="card bg-base-200 shadow mb-4">
-      <div class="card-body p-5 gap-3">
-        <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40">Importar SMF (.mid)</h2>
-        <p class="text-base-content/50 text-sm">Carga un archivo MIDI estándar para convertirlo en la frase activa.</p>
-        <div class="flex flex-wrap gap-3 items-center">
-          <label class="label-text shrink-0" for="smf-file">Archivo SMF</label>
-          <input
-            id="smf-file"
-            type="file"
-            accept=".mid,.midi"
-            on:change={handleMidiFileSelect}
-            disabled={midiLoading}
-            class="file-input file-input-bordered file-input-sm bg-base-300 flex-1 min-w-[220px]"
-          />
-          {#if midiLoading}
-            <span class="loading loading-spinner loading-sm"></span>
-          {:else if midiFileName}
-            <span class="text-base-content/40 text-xs">Último: {midiFileName}</span>
-          {/if}
-        </div>
-        {#if midiLoadError}
-          <p class="text-error text-sm">{midiLoadError}</p>
-        {/if}
-        {#if midiMetadata}
-          <div class="bg-base-300 rounded-lg p-4">
-            <h3 class="text-sm font-semibold mb-2">Metadatos extraídos</h3>
-            <ul class="text-sm space-y-1 text-base-content/60 list-disc list-inside">
-              <li>Formato: {midiMetadata.formatType} ({midiMetadata.trackCount} pistas)</li>
-              <li>Resolución: {midiMetadata.ticksPerQuarter} ticks por negra</li>
-              <li>BPM detectado: {midiMetadata.tempoBpm ?? 'sin meta tempo (usando actual)'}</li>
-              <li>Duración (compases aprox.): {Math.max(0, midiMetadata.durationBeats / 4).toFixed(2)}</li>
-              {#if midiMetadata.trackNames.length}
-                <li>Nombres de pista: {midiMetadata.trackNames.join(', ')}</li>
+            {#if sectionId === 'motor'}
+              <div class="flex flex-wrap gap-3 items-center">
+                <label class="label-text w-20 shrink-0" for="engine-mode">Modo</label>
+                <select id="engine-mode" value={engineMode} on:change={handleEngineModeChange}
+                  class="select select-bordered select-sm bg-base-300 min-w-[200px]">
+                  <option value="basic">Motor interno (seno simple)</option>
+                  <option value="fluid">FluidSynth + SoundFont GM</option>
+                </select>
+                {#if engineMode === 'fluid'}
+                  <span class="text-base-content/50 text-sm">{currentSoundFontLabel}</span>
+                {/if}
+              </div>
+              {#if engineMode === 'fluid'}
+                {#if fluidError}
+                  <p class="text-error text-sm">{fluidError}</p>
+                {/if}
+                <div class="flex flex-wrap gap-3 items-center">
+                  <label class="label-text min-w-[12rem] shrink-0" for="soundfont-file">Cargar SoundFont (.sf2/.sf3)</label>
+                  <input id="soundfont-file" type="file" accept=".sf2,.sf3"
+                    on:change={handleSoundFontSelect} disabled={soundFontLoading}
+                    class="file-input file-input-bordered file-input-sm bg-base-300 flex-1 min-w-[200px]" />
+                  <button type="button" on:click={handleLoadDefaultSoundFont} disabled={soundFontLoading}
+                    class="btn btn-sm btn-neutral">
+                    {soundFontLoading ? 'Cargando…' : 'Usar /fluidsynth/GeneralUser-GS.sf2'}
+                  </button>
+                </div>
+                <p class="text-base-content/40 text-xs">
+                  Coloca <code class="bg-base-300 px-1 rounded font-mono">libfluidsynth-*.js</code>,
+                  <code class="bg-base-300 px-1 rounded font-mono">libfluidsynth-*.wasm</code> y un SoundFont GM en
+                  <code class="bg-base-300 px-1 rounded font-mono">static/fluidsynth/</code>, o carga uno manualmente.
+                </p>
               {/if}
-            </ul>
-          </div>
-        {/if}
-      </div>
-    </section>
 
-    <!-- Packs de frases -->
-    <section class="card bg-base-200 shadow mb-4">
-      <div class="card-body p-5 gap-4">
-        <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40">Packs de frases (IndexedDB / OPFS)</h2>
-        {#if !storageReady}
-          <p class="text-base-content/50 text-sm">Inicializando almacenamiento local…</p>
-        {:else}
-          {#if storageError}
-            <p class="text-error text-sm">{storageError}</p>
-          {/if}
-          <form on:submit|preventDefault={handleSaveNewPack} class="flex flex-wrap gap-2 items-center">
-            <span class="label-text text-sm font-medium min-w-[10rem]">Nuevo pack desde el clip</span>
-            <input type="text" bind:value={newPackName} placeholder="Nombre del pack"
-              class="input input-bordered input-sm bg-base-300 flex-1 min-w-[140px]" />
-            <input type="text" bind:value={newPhraseName} placeholder="Nombre de la frase"
-              class="input input-bordered input-sm bg-base-300 flex-1 min-w-[140px]" />
-            <button type="submit" disabled={savingNewPack} class="btn btn-success btn-sm">
-              {savingNewPack ? 'Guardando…' : 'Guardar nuevo pack'}
-            </button>
-          </form>
+            {:else if sectionId === 'transport'}
+              <div class="flex flex-wrap gap-4 items-center">
+                <div class="flex items-center gap-2">
+                  <label class="label-text text-sm" for="bpm-input">BPM</label>
+                  <input id="bpm-input" type="number" bind:value={bpm} min="40" max="240"
+                    class="input input-bordered input-sm bg-base-300 w-20 text-center" />
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="label-text text-sm" for="transpose-input"
+                    title="Semitonos de transposición (±24). La percusión no se transpone.">Transpose</label>
+                  <input id="transpose-input" type="number" bind:value={semitoneOffset} min="-24" max="24"
+                    class="input input-bordered input-sm bg-base-300 w-20 text-center"
+                    title="Semitonos de transposición (±24). La percusión no se transpone." />
+                  <span class="badge badge-ghost badge-sm font-mono">
+                    {semitoneOffset > 0 ? `+${semitoneOffset}` : semitoneOffset} st
+                  </span>
+                </div>
+                <div class="flex items-center gap-2">
+                  <label class="label-text text-sm" for="play-source">Fuente</label>
+                  <select id="play-source" value={playSource} on:change={handlePlaySourceChange}
+                    class="select select-bordered select-sm bg-base-300 min-w-[200px]">
+                    <option value="arrangement">Secuencia (todas las pistas)</option>
+                    <option value="phrase">Solo frase actual</option>
+                  </select>
+                </div>
+              </div>
+              <div class="flex flex-wrap gap-2 items-center">
+                <button on:click={play} disabled={isPlaying || isPlayDisabled} class="btn btn-primary btn-sm">▶ Play</button>
+                <button on:click={stop} disabled={!isPlaying} class="btn btn-neutral btn-sm">■ Stop</button>
+                <button type="button" on:click={() => (loopMode = !loopMode)} title="Repetir en bucle"
+                  class={loopMode ? 'btn btn-info btn-sm' : 'btn btn-ghost btn-sm border border-base-300'}>
+                  ↺ Loop {loopMode ? 'ON' : 'OFF'}
+                </button>
+                <button type="button" on:click={handleExportSMF} disabled={!hasEvents}
+                  title="Exportar como archivo MIDI (.mid)"
+                  class="btn btn-ghost btn-sm border border-base-300">↓ Exportar MIDI</button>
+              </div>
+              <div class="flex items-center gap-3 pt-1 border-t border-base-300/40">
+                <span class="text-base-content/50 text-sm">
+                  Frase actual: <span class="text-base-content font-medium">{currentPhraseLabel}</span>
+                </span>
+                <button type="button" on:click={openPianoRoll} class="btn btn-ghost btn-xs border border-base-300">
+                  Abrir piano roll
+                </button>
+              </div>
+              {#if engineMode === 'fluid' && !fluidStatus.soundFontLoaded}
+                <p class="text-base-content/40 text-xs">Carga un SoundFont para habilitar la reproducción con FluidSynth.</p>
+              {/if}
 
-          <form on:submit|preventDefault={handleAddPhraseToPack} class="flex flex-wrap gap-2 items-center">
-            <span class="label-text text-sm font-medium min-w-[10rem]">Añadir al pack</span>
-            <select bind:value={appendPackId} class="select select-bordered select-sm bg-base-300 flex-1 min-w-[160px]">
-              <option value="" disabled selected={appendPackId === '' || packsCount === 0}>Selecciona un pack</option>
-              {#each $phrasePacks as pack}
-                <option value={pack.id}>{pack.name}</option>
-              {/each}
-            </select>
-            <input type="text" bind:value={newPhraseName} placeholder="Nombre de la frase"
-              class="input input-bordered input-sm bg-base-300 flex-1 min-w-[140px]" />
-            <button type="submit" disabled={!appendPackId || addingPhrase} class="btn btn-warning btn-sm">
-              {addingPhrase ? 'Añadiendo…' : 'Añadir frase'}
-            </button>
-          </form>
+            {:else if sectionId === 'ai'}
+              <p class="text-base-content/50 text-sm">
+                Descarga bajo demanda y se cachea automáticamente tras el primer uso. Pensado para tablets: muestra barra de progreso y no afecta al resto de la app.
+              </p>
+              <div class="flex flex-wrap gap-3 items-center">
+                <label class="label-text text-sm" for="ai-mode">Modo</label>
+                <select id="ai-mode" bind:value={aiMode} class="select select-bordered select-sm bg-base-300 min-w-[220px]">
+                  {#each aiModels as option}
+                    <option value={option.mode} disabled={option.disabled}>{option.label}</option>
+                  {/each}
+                </select>
+                <span class="text-base-content/40 text-xs">Modelo: {currentAiModel.modelName} (~{currentAiModel.sizeMb} MB)</span>
+                <button type="button" on:click={openAiModal} class="btn btn-secondary btn-sm">Abrir panel IA</button>
+                <div class={`badge badge-sm ${
+                  aiProgressStage === 'ready' ? 'badge-success' :
+                  aiProgressStage === 'downloading' ? 'badge-warning' : 'badge-ghost'
+                }`}>
+                  {aiProgressStage === 'downloading' ? 'Descargando…' : aiProgressStage === 'ready' ? 'Listo' : 'Pendiente'}
+                </div>
+              </div>
+              {#if currentAiModel.helper}
+                <p class="text-base-content/30 text-xs">{currentAiModel.helper}</p>
+              {/if}
 
-          <div>
-            <h3 class="text-sm font-semibold mb-2">Mis packs guardados</h3>
-            {#if !$phrasePacks.length}
-              <p class="text-base-content/40 text-sm">No hay packs guardados todavía. Guarda el clip de ejemplo para crear el primero.</p>
-            {:else}
-              <ul class="space-y-2">
-                {#each $phrasePacks as pack}
-                  <li class="bg-base-300 rounded-xl p-3">
-                    <div class="flex justify-between items-center gap-2 mb-2">
-                      <div>
-                        <span class="font-semibold text-sm">{pack.name}</span>
-                        <span class="text-base-content/30 text-xs ml-2">{new Date(pack.updatedAt).toLocaleString()}</span>
-                      </div>
-                      <button
-                        type="button"
-                        on:click={() => handleDeletePack(pack.id)}
-                        disabled={deletingPackId === pack.id}
-                        class="btn btn-error btn-xs"
-                      >
-                        {deletingPackId === pack.id ? 'Eliminando…' : 'Eliminar'}
-                      </button>
-                    </div>
-                    {#if !pack.phrases.length}
-                      <p class="text-base-content/30 text-xs">No hay frases en este pack.</p>
-                    {:else}
-                      <ul class="space-y-1">
-                        {#each pack.phrases as phrase}
-                          <li class="flex items-center gap-2">
-                            <button
-                              type="button"
-                              on:click={() => loadPhraseFromPack(pack.id, phrase.id)}
-                              disabled={loadingPhraseKey === `${pack.id}:${phrase.id}`}
-                              class="btn btn-primary btn-xs"
-                            >
-                              {loadingPhraseKey === `${pack.id}:${phrase.id}` ? 'Cargando…' : 'Cargar'}
-                            </button>
-                            <span class="text-sm">{phrase.name}</span>
-                            {#if phrase.bpm}
-                              <span class="badge badge-ghost badge-sm">{phrase.bpm} BPM</span>
-                            {/if}
-                          </li>
+            {:else if sectionId === 'sequencer'}
+              <p class="text-base-content/40 text-xs">
+                Organiza hasta {SLOT_COUNT} frases; cada frase dura 4 compases (16 beats). Frases activas: {arrangementActiveBars}/{SLOT_COUNT}.
+              </p>
+              <div class="overflow-x-auto">
+                <table class="table table-xs w-full min-w-[720px]">
+                  <thead>
+                    <tr>
+                      <th class="text-base-content/50 font-semibold">Pista</th>
+                      {#each slotIndices as si}
+                        <th class="text-center text-base-content/40 font-medium">Frase {si + 1}</th>
+                      {/each}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {#each trackLanes as lane}
+                      <tr>
+                        <th class="align-top w-36">
+                          <div class="flex items-center gap-2">
+                            <span aria-hidden="true" class="w-2.5 h-2.5 rounded-full shrink-0" style="background:{lane.color}"></span>
+                            <span class="font-medium text-sm">{lane.name}</span>
+                            <button type="button" on:click={() => clearTrack(lane.id)}
+                              class="btn btn-ghost btn-xs ml-auto text-base-content/40 hover:text-base-content">×</button>
+                          </div>
+                        </th>
+                        {#each slotIndices as slotIndex}
+                          <td class={`align-top transition-colors duration-200 ${
+                            playSource === 'arrangement' && activeSlotIndex === slotIndex
+                              ? 'bg-primary/20'
+                              : previewLaneId === lane.id && previewSlotIndex === slotIndex
+                              ? 'bg-info/15' : ''
+                          }`}>
+                            <div class="flex flex-col gap-1">
+                              <select
+                                value={lane.slots[slotIndex] ?? ''}
+                                on:change={(event) =>
+                                  updateTrackSlot(lane.id, slotIndex,
+                                    (event.currentTarget as HTMLSelectElement).value || null)}
+                                class="select select-bordered select-xs bg-base-300 w-full">
+                                <option value="">— Vacío —</option>
+                                <optgroup label="Frase actual">
+                                  <option value="current">{currentOptionLabel}</option>
+                                </optgroup>
+                                {#if packOptionEntries.length}
+                                  <optgroup label="Packs guardados">
+                                    {#each packOptionEntries.filter((o) => optionAllowedForLane(o, lane)) as option}
+                                      <option value={option.key}>{option.label}</option>
+                                    {/each}
+                                  </optgroup>
+                                {/if}
+                                <optgroup label="Frases base">
+                                  {#each builtinOptionEntries.filter((o) => optionAllowedForLane(o, lane)) as option}
+                                    <option value={`builtin:${option.key}`}>{option.label}</option>
+                                  {/each}
+                                </optgroup>
+                              </select>
+                              <div class="flex justify-between items-center gap-1">
+                                <span class="text-base-content/30 text-xs truncate max-w-[80px]">
+                                  {getPhraseLabel(lane.slots[slotIndex], currentPhraseLabel, packList)}
+                                </span>
+                                <div class="flex gap-1">
+                                  <button type="button" on:click={() => previewTrackSlot(lane.id, slotIndex)}
+                                    disabled={!lane.slots[slotIndex] || isPlaying}
+                                    title="Previsualizar" class="btn btn-ghost btn-xs">▶</button>
+                                  <button type="button" on:click={() => editSlotInPianoRoll(lane.id, slotIndex)}
+                                    disabled={!lane.slots[slotIndex]} class="btn btn-primary btn-xs">Editar</button>
+                                </div>
+                              </div>
+                            </div>
+                          </td>
                         {/each}
-                      </ul>
+                      </tr>
+                    {/each}
+                  </tbody>
+                </table>
+              </div>
+
+            {:else if sectionId === 'smf'}
+              <p class="text-base-content/50 text-sm">Carga un archivo MIDI estándar para convertirlo en la frase activa.</p>
+              <div class="flex flex-wrap gap-3 items-center">
+                <label class="label-text shrink-0" for="smf-file">Archivo SMF</label>
+                <input id="smf-file" type="file" accept=".mid,.midi"
+                  on:change={handleMidiFileSelect} disabled={midiLoading}
+                  class="file-input file-input-bordered file-input-sm bg-base-300 flex-1 min-w-[220px]" />
+                {#if midiLoading}
+                  <span class="loading loading-spinner loading-sm"></span>
+                {:else if midiFileName}
+                  <span class="text-base-content/40 text-xs">Último: {midiFileName}</span>
+                {/if}
+              </div>
+              {#if midiLoadError}
+                <p class="text-error text-sm">{midiLoadError}</p>
+              {/if}
+              {#if midiMetadata}
+                <div class="bg-base-300 rounded-lg p-4">
+                  <h3 class="text-sm font-semibold mb-2">Metadatos extraídos</h3>
+                  <ul class="text-sm space-y-1 text-base-content/60 list-disc list-inside">
+                    <li>Formato: {midiMetadata.formatType} ({midiMetadata.trackCount} pistas)</li>
+                    <li>Resolución: {midiMetadata.ticksPerQuarter} ticks por negra</li>
+                    <li>BPM detectado: {midiMetadata.tempoBpm ?? 'sin meta tempo (usando actual)'}</li>
+                    <li>Duración (compases aprox.): {Math.max(0, midiMetadata.durationBeats / 4).toFixed(2)}</li>
+                    {#if midiMetadata.trackNames.length}
+                      <li>Nombres de pista: {midiMetadata.trackNames.join(', ')}</li>
                     {/if}
-                  </li>
-                {/each}
+                  </ul>
+                </div>
+              {/if}
+
+            {:else if sectionId === 'packs'}
+              {#if !storageReady}
+                <p class="text-base-content/50 text-sm">Inicializando almacenamiento local…</p>
+              {:else}
+                {#if storageError}
+                  <p class="text-error text-sm">{storageError}</p>
+                {/if}
+                <form on:submit|preventDefault={handleSaveNewPack} class="flex flex-wrap gap-2 items-center">
+                  <span class="label-text text-sm font-medium min-w-[10rem]">Nuevo pack desde el clip</span>
+                  <input type="text" bind:value={newPackName} placeholder="Nombre del pack"
+                    class="input input-bordered input-sm bg-base-300 flex-1 min-w-[140px]" />
+                  <input type="text" bind:value={newPhraseName} placeholder="Nombre de la frase"
+                    class="input input-bordered input-sm bg-base-300 flex-1 min-w-[140px]" />
+                  <button type="submit" disabled={savingNewPack} class="btn btn-success btn-sm">
+                    {savingNewPack ? 'Guardando…' : 'Guardar nuevo pack'}
+                  </button>
+                </form>
+                <form on:submit|preventDefault={handleAddPhraseToPack} class="flex flex-wrap gap-2 items-center">
+                  <span class="label-text text-sm font-medium min-w-[10rem]">Añadir al pack</span>
+                  <select bind:value={appendPackId} class="select select-bordered select-sm bg-base-300 flex-1 min-w-[160px]">
+                    <option value="" disabled selected={appendPackId === '' || packsCount === 0}>Selecciona un pack</option>
+                    {#each $phrasePacks as pack}
+                      <option value={pack.id}>{pack.name}</option>
+                    {/each}
+                  </select>
+                  <input type="text" bind:value={newPhraseName} placeholder="Nombre de la frase"
+                    class="input input-bordered input-sm bg-base-300 flex-1 min-w-[140px]" />
+                  <button type="submit" disabled={!appendPackId || addingPhrase} class="btn btn-warning btn-sm">
+                    {addingPhrase ? 'Añadiendo…' : 'Añadir frase'}
+                  </button>
+                </form>
+                <div>
+                  <h3 class="text-sm font-semibold mb-2">Mis packs guardados</h3>
+                  {#if !$phrasePacks.length}
+                    <p class="text-base-content/40 text-sm">No hay packs guardados todavía. Guarda el clip de ejemplo para crear el primero.</p>
+                  {:else}
+                    <ul class="space-y-2">
+                      {#each $phrasePacks as pack}
+                        <li class="bg-base-300 rounded-xl p-3">
+                          <div class="flex justify-between items-center gap-2 mb-2">
+                            <div>
+                              <span class="font-semibold text-sm">{pack.name}</span>
+                              <span class="text-base-content/30 text-xs ml-2">{new Date(pack.updatedAt).toLocaleString()}</span>
+                            </div>
+                            <button type="button" on:click={() => handleDeletePack(pack.id)}
+                              disabled={deletingPackId === pack.id} class="btn btn-error btn-xs">
+                              {deletingPackId === pack.id ? 'Eliminando…' : 'Eliminar'}
+                            </button>
+                          </div>
+                          {#if !pack.phrases.length}
+                            <p class="text-base-content/30 text-xs">No hay frases en este pack.</p>
+                          {:else}
+                            <ul class="space-y-1">
+                              {#each pack.phrases as phrase}
+                                <li class="flex items-center gap-2">
+                                  <button type="button" on:click={() => loadPhraseFromPack(pack.id, phrase.id)}
+                                    disabled={loadingPhraseKey === `${pack.id}:${phrase.id}`} class="btn btn-primary btn-xs">
+                                    {loadingPhraseKey === `${pack.id}:${phrase.id}` ? 'Cargando…' : 'Cargar'}
+                                  </button>
+                                  <span class="text-sm">{phrase.name}</span>
+                                  {#if phrase.bpm}
+                                    <span class="badge badge-ghost badge-sm">{phrase.bpm} BPM</span>
+                                  {/if}
+                                </li>
+                              {/each}
+                            </ul>
+                          {/if}
+                        </li>
+                      {/each}
+                    </ul>
+                  {/if}
+                </div>
+              {/if}
+
+            {:else if sectionId === 'info'}
+              <ul class="text-sm text-base-content/50 space-y-1 list-disc list-inside">
+                <li>AudioWorklet con sintetizador simple (seno) y <em>scheduler</em> básico</li>
+                <li>VitePWA: manifest &amp; service worker (instalable/offline)</li>
+                <li>Página de prueba + controles</li>
               </ul>
             {/if}
-          </div>
-        {/if}
-      </div>
-    </section>
 
-    <!-- Qué incluye -->
-    <div class="card bg-base-200 shadow">
-      <div class="card-body p-5">
-        <h2 class="text-xs font-semibold uppercase tracking-widest text-base-content/40">Qué incluye este esqueleto</h2>
-        <ul class="text-sm text-base-content/50 space-y-1 list-disc list-inside">
-          <li>AudioWorklet con sintetizador simple (seno) y <em>scheduler</em> básico</li>
-          <li>VitePWA: manifest &amp; service worker (instalable/offline)</li>
-          <li>Página de prueba + controles</li>
-        </ul>
+          {/if}
+        </div>
       </div>
-    </div>
+    {/each}
 
   </div>
 
   <!-- Modal IA -->
   {#if aiModalOpen}
-    <div
-      class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-[1000]"
-      on:click|self={closeAiModal}
-    >
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-[1000]"
+      on:click|self={closeAiModal}>
       <div class="card bg-base-200 border border-base-300 shadow-2xl w-full max-w-lg">
         <div class="card-body gap-4">
           <div class="flex justify-between items-center">
@@ -1689,11 +1661,8 @@
             <progress class="progress progress-secondary w-full" value={aiProgressPercent} max="100"></progress>
             <div class="flex justify-between text-xs text-base-content/50">
               <span>
-                {aiProgressStage === 'downloading'
-                  ? 'Descargando modelo…'
-                  : aiProgressStage === 'ready'
-                  ? 'Modelo cacheado/listo'
-                  : 'Aún no descargado'}
+                {aiProgressStage === 'downloading' ? 'Descargando modelo…'
+                  : aiProgressStage === 'ready' ? 'Modelo cacheado/listo' : 'Aún no descargado'}
               </span>
               <span>
                 {aiBytesTotal
@@ -1701,26 +1670,19 @@
                   : `~${currentAiModel.sizeMb} MB`}
               </span>
             </div>
-            {#if aiError}
-              <p class="text-error text-sm">{aiError}</p>
-            {/if}
+            {#if aiError}<p class="text-error text-sm">{aiError}</p>{/if}
             <p class="text-base-content/30 text-xs">Modelo: {currentAiModel.modelName}</p>
           </div>
           <div class="flex flex-wrap gap-2 items-center">
-            <button
-              type="button"
-              on:click={handleAiDownload}
-              disabled={aiBusy || aiProgressStage === 'downloading'}
-              class="btn btn-primary btn-sm"
-            >
+            <button type="button" on:click={handleAiDownload}
+              disabled={aiBusy || aiProgressStage === 'downloading'} class="btn btn-primary btn-sm">
               {aiProgressStage === 'ready' ? 'Reintentar descarga' : aiBusy ? 'Descargando…' : 'Descargar modelo'}
             </button>
             <button type="button" on:click={handleAiGenerate} disabled={aiBusy} class="btn btn-info btn-sm">
               Generar {aiMode === 'drums' ? 'batería' : 'melodía'}
             </button>
-            <button type="button" on:click={handleAiCancel} disabled={!aiBusy} class="btn btn-ghost btn-sm border border-base-300">
-              Cancelar
-            </button>
+            <button type="button" on:click={handleAiCancel} disabled={!aiBusy}
+              class="btn btn-ghost btn-sm border border-base-300">Cancelar</button>
             <span class="text-base-content/40 text-xs">El resultado reemplazará la frase actual.</span>
           </div>
         </div>
@@ -1730,10 +1692,8 @@
 
   <!-- Modal Piano Roll -->
   {#if pianoRollOpen}
-    <div
-      class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-[1100]"
-      on:click|self={closePianoRoll}
-    >
+    <div class="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-[1100]"
+      on:click|self={closePianoRoll}>
       <div class="card bg-base-200 border border-base-300 shadow-2xl w-full max-w-[1180px] max-h-[92vh] overflow-auto">
         <div class="card-body gap-3">
           <div class="flex justify-between items-center">
