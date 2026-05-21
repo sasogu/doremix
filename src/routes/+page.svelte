@@ -25,6 +25,7 @@
     type QuantizedNoteSequence
   } from '$lib/ai/noteSequenceAdapters';
   import PianoRoll from '$lib/components/PianoRoll.svelte';
+  import { exportSMF } from '$lib/midi/exportSMF';
 
   type EngineMode = 'basic' | 'fluid';
   type PlaySource = 'arrangement' | 'phrase';
@@ -79,6 +80,8 @@
 
   let bpm = 120;
   let isPlaying = false;
+  let loopMode = false;
+  let semitoneOffset = 0;
 
   const defaultEvents: PhraseEvent[] = [
     { beat: 0, type: 'noteon', note: 60, velocity: 0.8 },
@@ -500,6 +503,9 @@
           isPlaying = false;
           clearPlayStopTimer();
           stopVisualTracking({ keepPlayhead: true });
+          if (loopMode) {
+            play();
+          }
           return;
         }
         if (source === 'arrangement') {
@@ -568,6 +574,14 @@
     previewSlotIndex = null;
   }
 
+  function transposeEvent(ev: PhraseEvent, semitones: number): PhraseEvent {
+    if (semitones === 0) return ev;
+    // Canal 9 = percusión: no se transpone
+    if ((ev.channel ?? 0) === 9) return ev;
+    const note = Math.max(0, Math.min(127, ev.note + semitones));
+    return { ...ev, note };
+  }
+
   function buildArrangementEvents(
     lanes: TrackLane[],
     current: Phrase,
@@ -582,13 +596,14 @@
         if (!phrase || !phrase.events.length) return;
         const offset = offsets[slotIndex] ?? 0;
         phrase.events.forEach((ev) => {
-          events.push({
+          const withCh: PhraseEvent = {
             type: ev.type,
             note: ev.note,
             velocity: ev.velocity,
             beat: ev.beat + offset,
             channel: ev.channel ?? channelForLane(lane)
-          });
+          };
+          events.push(transposeEvent(withCh, semitoneOffset));
         });
       });
     });
@@ -742,12 +757,15 @@
     if (!ac || !worklet || !eventsSource.length) return null;
     const secPerBeat = 60 / bpmValue;
     const start = ac.currentTime + 0.1;
-    const events = eventsSource.map((ev) => ({
-      t: start + ev.beat * secPerBeat,
-      type: ev.type,
-      note: ev.note,
-      velocity: ev.velocity ?? 0
-    }));
+    const events = eventsSource.map((ev) => {
+      const transposed = transposeEvent(ev, semitoneOffset);
+      return {
+        t: start + transposed.beat * secPerBeat,
+        type: transposed.type,
+        note: transposed.note,
+        velocity: transposed.velocity ?? 0
+      };
+    });
     worklet.port.postMessage({ type: 'schedule', events });
     return start;
   }
@@ -1203,6 +1221,29 @@
     aiBusy = false;
   }
 
+  function handleExportSMF() {
+    const source = playSource === 'arrangement' ? 'arrangement' : 'phrase';
+    if (source === 'arrangement') {
+      const trackData = trackLanes.map((lane) => ({
+        name: lane.name,
+        channel: lane.category === 'perc' ? 9 : 0,
+        events: arrangementEvents.filter((ev) => {
+          // Filtra eventos por canal de la pista
+          const ch = ev.channel ?? 0;
+          return lane.category === 'perc' ? ch === 9 : ch !== 9;
+        })
+      }));
+      exportSMF(trackData, bpm, currentPhrase.name || 'doremix-arrangement');
+    } else {
+      const events = clip.map((ev) => transposeEvent(ev, semitoneOffset));
+      exportSMF(
+        [{ name: currentPhrase.name, channel: 0, events }],
+        bpm,
+        currentPhrase.name || 'doremix-phrase'
+      );
+    }
+  }
+
   async function handleRollPlay() {
     playSource = 'phrase';
     await play();
@@ -1275,10 +1316,23 @@
     {/if}
   </section>
 
-  <div style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;">
+  <div style="display:flex; gap:1rem; align-items:center; margin-bottom:0.6rem; flex-wrap:wrap;">
     <label for="bpm-input">BPM</label>
     <input id="bpm-input" type="number" bind:value={bpm} min="40" max="240" style="width:5rem; padding:0.4rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;" />
-    <label for="play-source">Reproducir</label>
+
+    <label for="transpose-input" title="Semitonos de transposición (±24). La percusión no se transpone.">Transpose</label>
+    <input
+      id="transpose-input"
+      type="number"
+      bind:value={semitoneOffset}
+      min="-24"
+      max="24"
+      style="width:4.5rem; padding:0.4rem; background:#181818; color:#fff; border:1px solid #333; border-radius:8px;"
+      title="Semitonos de transposición (±24). La percusión no se transpone."
+    />
+    <span style="opacity:0.6; font-size:0.85rem;">{semitoneOffset > 0 ? `+${semitoneOffset}` : semitoneOffset} st</span>
+
+    <label for="play-source">Fuente</label>
     <select
       id="play-source"
       value={playSource}
@@ -1288,8 +1342,27 @@
       <option value="arrangement">Secuencia (todas las pistas)</option>
       <option value="phrase">Solo frase actual</option>
     </select>
-    <button on:click={play} disabled={isPlaying || isPlayDisabled} style="padding:0.6rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;">Play</button>
-    <button on:click={stop} disabled={!isPlaying} style="padding:0.6rem 1rem; border-radius:10px; background:#444; color:#fff; border:0;">Stop</button>
+  </div>
+  <div style="display:flex; gap:0.6rem; align-items:center; margin-bottom:1rem; flex-wrap:wrap;">
+    <button on:click={play} disabled={isPlaying || isPlayDisabled} style="padding:0.6rem 1rem; border-radius:10px; background:#2c7efc; color:#fff; border:0;">▶ Play</button>
+    <button on:click={stop} disabled={!isPlaying} style="padding:0.6rem 1rem; border-radius:10px; background:#444; color:#fff; border:0;">■ Stop</button>
+    <button
+      type="button"
+      on:click={() => (loopMode = !loopMode)}
+      title="Repetir en bucle"
+      style={`padding:0.6rem 1rem; border-radius:10px; border:1px solid ${loopMode ? '#22d3ee' : '#333'}; background:${loopMode ? 'rgba(34,211,238,0.15)' : '#1f1f1f'}; color:${loopMode ? '#22d3ee' : '#aaa'};`}
+    >
+      ↺ Loop {loopMode ? 'ON' : 'OFF'}
+    </button>
+    <button
+      type="button"
+      on:click={handleExportSMF}
+      disabled={!hasEvents}
+      title="Exportar como archivo MIDI (.mid)"
+      style="padding:0.6rem 1rem; border-radius:10px; background:#1f1f1f; color:#fff; border:1px solid #333;"
+    >
+      ↓ Exportar MIDI
+    </button>
   </div>
   {#if engineMode === 'fluid' && !fluidStatus.soundFontLoaded}
     <p style="opacity:0.65; margin:-0.5rem 0 1.5rem 0;">Carga un SoundFont para habilitar la reproducción con FluidSynth.</p>
