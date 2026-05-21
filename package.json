@@ -15,8 +15,11 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^6.2.1",
+    "@tailwindcss/vite": "^4.3.0",
     "@types/workbox-window": "latest",
+    "daisyui": "^5.5.20",
     "playwright": "^1.60.0",
+    "tailwindcss": "^4.3.0",
     "typescript": "^5.9.3",
     "vite": "^7.1.9",
     "vite-plugin-pwa": "^1.0.3"
