@@ -1,0 +1,25 @@
+# Dependencias
+node_modules/
+
+# Build y caché de SvelteKit / Vite
+.svelte-kit/
+build/
+dist/
+
+# Entorno
+.env
+.env.*
+!.env.example
+
+# Editores
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Sistema
+.DS_Store
+Thumbs.db
